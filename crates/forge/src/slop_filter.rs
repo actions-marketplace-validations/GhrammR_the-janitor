@@ -89,6 +89,19 @@ pub struct SlopScore {
     /// Detected by [`crate::metadata::CommentScanner::is_pr_unlinked`].
     /// Carries a fixed penalty of ×20 when set.
     pub unlinked_pr: u32,
+
+    /// Human-readable description of each antipattern finding — one entry per
+    /// [`antipatterns_found`](Self::antipatterns_found) count.
+    ///
+    /// Populated in patch mode (via [`PatchBouncer`]); empty in git-native mode
+    /// where blobs are processed per-file without a unified surface string.
+    pub antipattern_details: Vec<String>,
+
+    /// Truncated matched phrase for each comment violation — one entry per
+    /// [`comment_violations`](Self::comment_violations) count.
+    ///
+    /// Populated in patch mode only; empty in git-native mode.
+    pub comment_violation_details: Vec<String>,
 }
 
 impl SlopScore {
@@ -348,7 +361,11 @@ impl PRBouncer for PatchBouncer {
         }
 
         // Language-specific antipattern detection via slop_hunter.
-        let antipatterns_found = crate::slop_hunter::find_slop(ext, source).len() as u32;
+        // Collect descriptions so callers can surface named violations, not just counts.
+        let slop_findings = crate::slop_hunter::find_slop(ext, source);
+        let antipatterns_found = slop_findings.len() as u32;
+        let antipattern_details: Vec<String> =
+            slop_findings.into_iter().map(|f| f.description).collect();
 
         // Dead symbols added — name already exists in registry.
         let registry_names: HashSet<&str> =
@@ -436,6 +453,7 @@ impl PRBouncer for PatchBouncer {
             logic_clones_found: patch_internal_clones + fuzzy_near_clones + global_clone_count,
             zombie_symbols_added,
             antipatterns_found,
+            antipattern_details,
             ..SlopScore::default()
         })
     }
@@ -559,11 +577,14 @@ pub fn bounce_git(
             path = path.display()
         );
 
-        if let Ok(score) = PatchBouncer.bounce(&fake_patch, registry) {
+        if let Ok(mut score) = PatchBouncer.bounce(&fake_patch, registry) {
             total.dead_symbols_added += score.dead_symbols_added;
             total.logic_clones_found += score.logic_clones_found;
             total.zombie_symbols_added += score.zombie_symbols_added;
             total.antipatterns_found += score.antipatterns_found;
+            total
+                .antipattern_details
+                .append(&mut score.antipattern_details);
             let _ = ext; // used indirectly through fake_patch header
         }
     }

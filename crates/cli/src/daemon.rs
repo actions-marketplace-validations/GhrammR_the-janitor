@@ -342,25 +342,31 @@ pub mod unix {
 
                         // Persist to bounce_log.ndjson for `janitor report` aggregation.
                         // Daemon connections have no PR-number / author context — those
+                        // Cache computed values before consuming Vec fields via move.
+                        let slop_score = score.score();
+                        let antipatterns_count = score.antipatterns_found;
+                        let zombie_symbols_added = score.zombie_symbols_added;
+
                         // fields are None.  Best-effort: I/O errors are silently dropped.
                         let log_entry = crate::report::BounceLogEntry {
                             pr_number: None,
                             author: None,
                             timestamp: crate::utc_now_iso8601(),
-                            slop_score: score.score(),
+                            slop_score,
                             dead_symbols_added: score.dead_symbols_added,
                             logic_clones_found: score.logic_clones_found,
-                            zombie_symbols_added: score.zombie_symbols_added,
-                            antipatterns_found: score.antipatterns_found,
+                            zombie_symbols_added,
+                            antipatterns: score.antipattern_details,
+                            comment_violations: score.comment_violation_details,
                             min_hashes: sig.min_hashes.to_vec(),
                             zombie_deps: Vec::new(),
                         };
                         crate::report::append_bounce_log(&state.janitor_dir, &log_entry);
 
                         DaemonResponse::Report {
-                            slop_score: score.score() as f64,
-                            zombies: score.zombie_symbols_added,
-                            antipatterns: score.antipatterns_found,
+                            slop_score: slop_score as f64,
+                            zombies: zombie_symbols_added,
+                            antipatterns: antipatterns_count,
                         }
                     }
                     Err(e) => DaemonResponse::Error {

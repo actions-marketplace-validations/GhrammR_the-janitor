@@ -44,8 +44,19 @@ pub struct BounceLogEntry {
     pub logic_clones_found: u32,
     /// Number of zombie symbol reintroductions (verbatim body match to dead symbol).
     pub zombie_symbols_added: u32,
-    /// Number of language-specific antipatterns (hallucinated imports, vacuous unsafe, etc.).
-    pub antipatterns_found: u32,
+    /// Descriptions of each language-specific antipattern finding.
+    ///
+    /// One entry per detection (hallucinated import, vacuous unsafe, goroutine closure trap,
+    /// Kubernetes wildcard host, etc.).  The count `antipatterns_found` is `antipatterns.len()`.
+    /// Populated in patch mode; empty for git-native bounces and pre-v6.9 log entries.
+    #[serde(default)]
+    pub antipatterns: Vec<String>,
+    /// Matched banned phrase for each comment violation.
+    ///
+    /// Format: `"[line N] <phrase>"`.  Populated in patch mode only.
+    /// Empty for git-native bounces and pre-v6.9 log entries.
+    #[serde(default)]
+    pub comment_violations: Vec<String>,
     /// MinHash sketch — 64 `u64` values — for clone detection via [`LshIndex`].
     ///
     /// Computed from raw patch bytes (patch mode) or the deterministic merkle key
@@ -255,7 +266,7 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
                 e.dead_symbols_added,
                 e.logic_clones_found,
                 e.zombie_symbols_added,
-                e.antipatterns_found,
+                e.antipatterns.len(),
             ));
         }
     }
@@ -342,7 +353,9 @@ pub fn render_json(data: &ReportData, repo_name: &str) -> serde_json::Value {
                 "dead_symbols_added": e.dead_symbols_added,
                 "logic_clones_found": e.logic_clones_found,
                 "zombie_symbols_added": e.zombie_symbols_added,
-                "antipatterns_found": e.antipatterns_found,
+                "antipatterns_found": e.antipatterns.len(),
+                "antipatterns": e.antipatterns,
+                "comment_violations": e.comment_violations,
             })
         }).collect::<Vec<_>>(),
         "clone_pairs": data.clone_pairs.iter().map(|(a, b)| {
@@ -579,7 +592,7 @@ pub fn aggregate_global(repos: Vec<(String, Vec<BounceLogEntry>)>) -> GlobalRepo
         .map(|(repo_name, entries)| {
             let pr_count = entries.len();
             let total_slop_score: u64 = entries.iter().map(|e| e.slop_score as u64).sum();
-            let antipatterns_found: u32 = entries.iter().map(|e| e.antipatterns_found).sum();
+            let antipatterns_found: u32 = entries.iter().map(|e| e.antipatterns.len() as u32).sum();
             let dead_symbols_added: u32 = entries.iter().map(|e| e.dead_symbols_added).sum();
             let zombie_dep_prs: u32 =
                 entries.iter().filter(|e| !e.zombie_deps.is_empty()).count() as u32;

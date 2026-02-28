@@ -5,6 +5,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 mod daemon;
+mod export;
 mod report;
 
 #[derive(Parser)]
@@ -280,6 +281,25 @@ enum Commands {
         /// Project root (writes .janitor/wisdom.rkyv).
         path: PathBuf,
     },
+    /// Export bounce log as a CSV file for spreadsheet or notebook analysis.
+    ///
+    /// Reads `.janitor/bounce_log.ndjson` (populated by `janitor bounce`) and writes
+    /// one CSV row per bounce invocation.
+    ///
+    /// ## Columns
+    /// `PR_Number`, `Author`, `Score`, `Dead_Code_Count`, `Logic_Clones`,
+    /// `Zombie_Syms`, `Zombie_Deps`, `Antipatterns`, `Comment_Violations`, `Timestamp`.
+    ///
+    /// Antipattern and comment-violation strings are joined with `;` so each row fits a
+    /// single cell; split on `;` inside Excel / pandas to expand them.
+    Export {
+        /// Project root (reads `<repo>/.janitor/bounce_log.ndjson`).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Output CSV file path.
+        #[arg(long, short = 'o', default_value = "bounce_export.csv")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -427,6 +447,7 @@ async fn main() -> anyhow::Result<()> {
             daemon::unix::serve(std::path::Path::new(socket), &registry_path).await?;
         }
         Commands::UpdateWisdom { path } => cmd_update_wisdom(path)?,
+        Commands::Export { repo, out } => export::cmd_export(repo, out)?,
     }
 
     Ok(())
@@ -1964,6 +1985,11 @@ fn cmd_bounce(
             let scanner = forge::metadata::CommentScanner::new();
             let comment_violations = scanner.scan_patch(&patch);
             score.comment_violations = comment_violations.len() as u32;
+            // Populate detail strings for the violation phrases.
+            score.comment_violation_details = comment_violations
+                .iter()
+                .map(|v| format!("[line {}] {}", v.line, v.phrase))
+                .collect();
             if let Some(body) = pr_body {
                 if scanner.is_pr_unlinked(body) {
                     score.unlinked_pr = 1;
@@ -2027,7 +2053,8 @@ fn cmd_bounce(
         dead_symbols_added: score.dead_symbols_added,
         logic_clones_found: score.logic_clones_found,
         zombie_symbols_added: score.zombie_symbols_added,
-        antipatterns_found: score.antipatterns_found,
+        antipatterns: score.antipattern_details,
+        comment_violations: score.comment_violation_details,
         min_hashes: min_hashes_vec,
         zombie_deps,
     };
