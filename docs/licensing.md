@@ -57,7 +57,7 @@ A commercial license is required when **any of the following apply**:
 | **Team** | **$499/yr** | Teams up to 25. All free features + Ed25519 Integrity Bonds + CI/CD Compliance Attestation + The Governor GitHub App. |
 | **Industrial** | **Custom** | Monoliths >1M LOC. On-prem token server, keypair rotation protocol, SOC 2 audit support, enterprise SLA, unlimited seats. |
 
-[**Get Certified → thejanitor.lemonsqueezy.com**](INSERT_REAL_LEMONSQUEEZY_LINK_HERE)
+[**Get Certified → thejanitor.lemonsqueezy.com**](https://forgelogic.lemonsqueezy.com/checkout/buy/99915c1e-1c7e-4749-94d8-6de7ed8e33b9)
 
 ---
 
