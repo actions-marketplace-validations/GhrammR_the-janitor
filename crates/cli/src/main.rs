@@ -246,6 +246,8 @@ enum Commands {
     /// - **Slop Top 50**: PRs ranked by composite SlopScore.
     /// - **Structural Clones**: near-duplicate PR pairs detected via 64-hash MinHash LSH.
     /// - **Zombie Dependencies**: PRs that introduced packages never imported in source.
+    ///
+    /// Pass `--global` to aggregate bounce logs from all repos under a gauntlet directory.
     Report {
         /// Path to the target repository (reads `<repo>/.janitor/bounce_log.ndjson`).
         #[arg(long, default_value = ".")]
@@ -259,6 +261,16 @@ enum Commands {
         /// Write the report to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Aggregate bounce logs from ALL repos under a gauntlet directory.
+        ///
+        /// When set, `--repo` is ignored and `--gauntlet` discovers all repos.
+        #[arg(long)]
+        global: bool,
+        /// Root directory containing multiple repos for `--global` aggregation.
+        ///
+        /// Defaults to `~/dev/gauntlet/` when `--global` is set.
+        #[arg(long)]
+        gauntlet: Option<PathBuf>,
     },
     /// Synchronise the local Wisdom Registry with The Governor.
     ///
@@ -390,7 +402,9 @@ async fn main() -> anyhow::Result<()> {
             top,
             format,
             out,
-        } => cmd_report(repo, *top, format, out.as_deref())?,
+            global,
+            gauntlet,
+        } => cmd_report(repo, *top, format, out.as_deref(), *global, gauntlet.as_deref())?,
         Commands::Mcp => mcp::serve().await?,
         #[cfg(unix)]
         Commands::Serve {
@@ -2018,12 +2032,90 @@ fn cmd_bounce(
 
 /// Generate an intelligence report from historical bounce results or a live scan.
 ///
+// ---------------------------------------------------------------------------
+// report --global
+// ---------------------------------------------------------------------------
+
+/// Discovers all bounce logs under `gauntlet_root` and renders a cross-repo
+/// global slop aggregation report.
+fn cmd_report_global(
+    format: &str,
+    out: Option<&Path>,
+    gauntlet: Option<&Path>,
+) -> anyhow::Result<()> {
+    let default_gauntlet = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("dev")
+        .join("gauntlet");
+    let gauntlet_root = gauntlet.unwrap_or(&default_gauntlet);
+
+    let gauntlet_str = gauntlet_root.display().to_string();
+
+    eprintln!(
+        "Scanning for bounce logs under `{}`...",
+        gauntlet_root.display()
+    );
+
+    let repo_logs = report::discover_bounce_logs(gauntlet_root);
+    if repo_logs.is_empty() {
+        eprintln!(
+            "No bounce logs found under `{}`. \
+             Run `janitor bounce` in each repo to populate logs.",
+            gauntlet_root.display()
+        );
+        return Ok(());
+    }
+
+    eprintln!(
+        "Found {} repos with bounce data. Aggregating...",
+        repo_logs.len()
+    );
+
+    let data = report::aggregate_global(repo_logs);
+
+    let content = if format == "json" {
+        serde_json::to_string_pretty(&report::render_global_json(&data, &gauntlet_str))
+            .context("serializing global report JSON")?
+    } else {
+        report::render_global_markdown(&data, &gauntlet_str)
+    };
+
+    match out {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::write(path, content.as_bytes())
+                .with_context(|| format!("writing report to {}", path.display()))?;
+            println!("Global report written: {}", path.display());
+        }
+        None => print!("{}", content),
+    }
+
+    Ok(())
+}
+
 /// Primary mode: reads `.janitor/bounce_log.ndjson` and renders Slop Top 50,
 /// Structural Clones, and Zombie Dependencies.
 ///
 /// Fallback (no bounce log): runs the anatomist pipeline directly and renders
 /// a dead-symbol audit ranked by byte size descending.
-fn cmd_report(repo: &Path, top: usize, format: &str, out: Option<&Path>) -> anyhow::Result<()> {
+///
+/// With `global=true`: discovers all repos under `gauntlet` and aggregates
+/// bounce logs across the entire Gauntlet for a cross-repo summary.
+fn cmd_report(
+    repo: &Path,
+    top: usize,
+    format: &str,
+    out: Option<&Path>,
+    global: bool,
+    gauntlet: Option<&Path>,
+) -> anyhow::Result<()> {
+    if global {
+        return cmd_report_global(format, out, gauntlet);
+    }
     use anatomist::pipeline::ScanEvent;
     use anatomist::{heuristics::pytest::PytestFixtureHeuristic, parser::ParserHost, pipeline};
 

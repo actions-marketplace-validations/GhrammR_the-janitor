@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# tools/grand_slam.sh — THE GRAND SLAM
+#
+# Full-corpus PR audit using a local git clone.
+# One batch API call caches ALL open PRs. Smart OID detection skips
+# unnecessary `git fetch` calls. Survives 4,600+ PR corpora without
+# burning the GitHub 5,000 req/hr rate limit.
+#
+# Usage:
+#   ./tools/grand_slam.sh [local_repo_path]
+#
+# Environment overrides:
+#   JANITOR     — path to janitor binary        (default: ./target/release/janitor)
+#   LOCAL_REPO  — path to local git clone       (default: ~/dev/gauntlet/godot-git)
+#   REPO_SLUG   — GitHub "owner/repo" slug      (default: godotengine/godot)
+#   CACHE_FILE  — PR list JSON cache            (default: ~/.janitor/pr_cache.json)
+#   PR_LIMIT    — max PRs to fetch into cache   (default: 5000)
+#   START_AT    — resume from this PR index (0-based, default: 0)
+
+set -uo pipefail
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+JANITOR="${JANITOR:-$(pwd)/target/release/janitor}"
+LOCAL_REPO="${1:-${LOCAL_REPO:-$HOME/dev/gauntlet/godot-git}}"
+REPO_SLUG="${REPO_SLUG:-godotengine/godot}"
+CACHE_FILE="${CACHE_FILE:-$HOME/.janitor/pr_cache.json}"
+PR_LIMIT="${PR_LIMIT:-5000}"
+START_AT="${START_AT:-0}"
+BODY_MAX_BYTES=4096
+
+# ── Colours ───────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    RED='\033[0;31m' YLW='\033[0;33m' GRN='\033[0;32m' DIM='\033[2m' NC='\033[0m'
+else
+    RED='' YLW='' GRN='' DIM='' NC=''
+fi
+info()  { echo -e "${GRN}==>${NC} $*"; }
+warn()  { echo -e "${YLW}WARN${NC}  $*"; }
+fail()  { echo -e "${RED}FAIL${NC}  $*"; }
+
+# ── Preflight ─────────────────────────────────────────────────────────────────
+for dep in gh git jq; do
+    command -v "$dep" >/dev/null 2>&1 || { fail "'$dep' not found in PATH — aborting."; exit 1; }
+done
+
+if [[ ! -x "$JANITOR" ]]; then
+    fail "janitor binary not found at $JANITOR"
+    echo "      Run: cargo build --release --bin janitor"
+    exit 1
+fi
+
+if [[ ! -d "$LOCAL_REPO/.git" ]]; then
+    fail "LOCAL_REPO '$LOCAL_REPO' is not a git repository (no .git directory)."
+    echo "      Clone with: git clone https://github.com/${REPO_SLUG}.git $LOCAL_REPO"
+    exit 1
+fi
+
+info "Janitor    : $JANITOR"
+info "Local repo : $LOCAL_REPO"
+info "Slug       : $REPO_SLUG"
+info "Cache      : $CACHE_FILE"
+echo ""
+
+# ── Registry bootstrap ────────────────────────────────────────────────────────
+REGISTRY="$LOCAL_REPO/.janitor/symbols.rkyv"
+if [[ ! -f "$REGISTRY" ]]; then
+    info "No registry found — running janitor scan (~30-60 s)..."
+    "$JANITOR" scan "$LOCAL_REPO" --format json >/dev/null 2>&1
+    info "Scan complete. Registry written to $REGISTRY"
+fi
+
+# ── PR cache: fetch ALL open PRs in one API call ──────────────────────────────
+if [[ ! -f "$CACHE_FILE" ]]; then
+    mkdir -p "$(dirname "$CACHE_FILE")"
+    info "Fetching up to $PR_LIMIT open PRs from $REPO_SLUG (one API call)..."
+    gh pr list \
+        --repo   "$REPO_SLUG" \
+        --state  open \
+        --limit  "$PR_LIMIT" \
+        --json   number,headRefOid,baseRefOid,author,body \
+        > "$CACHE_FILE"
+    FETCHED=$(jq 'length' "$CACHE_FILE")
+    info "Cached $FETCHED PRs → $CACHE_FILE"
+else
+    FETCHED=$(jq 'length' "$CACHE_FILE")
+    info "Using cached PR list: $FETCHED PRs → $CACHE_FILE"
+    info "  (delete cache to refresh: rm $CACHE_FILE)"
+fi
+echo ""
+
+TOTAL=$(jq 'length' "$CACHE_FILE")
+
+# ── Counters ──────────────────────────────────────────────────────────────────
+PROCESSED=0; SKIPPED=0; ERRORS=0; FETCHED_COUNT=0
+UNLINKED_COUNT=0; COMMENT_VIOLATIONS=0; HIGH_SCORE=0; HIGH_PR=0
+
+# ── Per-PR bounce loop ────────────────────────────────────────────────────────
+INDEX=0
+while IFS= read -r PR; do
+    # Resume support: skip PRs before START_AT.
+    if [[ $INDEX -lt $START_AT ]]; then
+        INDEX=$((INDEX + 1))
+        continue
+    fi
+
+    NUMBER=$(echo "$PR" | jq -r '.number')
+    AUTHOR=$(echo "$PR" | jq -r '.author.login // "unknown"')
+    HEAD_OID=$(echo "$PR" | jq -r '.headRefOid')
+    BASE_OID=$(echo "$PR" | jq -r '.baseRefOid')
+    BODY=$(echo "$PR" | jq -r '.body // ""' | head -c "$BODY_MAX_BYTES" | tr -d '\000')
+
+    DISPLAY_IDX=$((INDEX + 1))
+    printf "  [%4d/%d] PR #%-5s %-20s  " "$DISPLAY_IDX" "$TOTAL" "$NUMBER" "($AUTHOR)"
+
+    # ── Smart fetch: check if headRefOid is already present ──────────────────
+    OBJ_TYPE=$(git -C "$LOCAL_REPO" cat-file -t "$HEAD_OID" 2>/dev/null || true)
+    if [[ "$OBJ_TYPE" != "commit" ]]; then
+        # OID not in local repo — fetch it from GitHub.
+        # GitHub supports fetching arbitrary commit SHAs via refs/pull/<N>/head.
+        if ! git -C "$LOCAL_REPO" fetch origin "refs/pull/${NUMBER}/head" --quiet 2>/dev/null; then
+            echo "[SKIP: fetch failed for refs/pull/${NUMBER}/head]"
+            SKIPPED=$((SKIPPED + 1))
+            INDEX=$((INDEX + 1))
+            continue
+        fi
+        FETCHED_COUNT=$((FETCHED_COUNT + 1))
+        # Verify the OID is now present.
+        OBJ_TYPE=$(git -C "$LOCAL_REPO" cat-file -t "$HEAD_OID" 2>/dev/null || true)
+        if [[ "$OBJ_TYPE" != "commit" ]]; then
+            echo "[SKIP: OID $HEAD_OID not found after fetch]"
+            SKIPPED=$((SKIPPED + 1))
+            INDEX=$((INDEX + 1))
+            continue
+        fi
+    fi
+
+    # ── Bounce (git-native mode) ───────────────────────────────────────────────
+    RESULT=$("$JANITOR" bounce "$LOCAL_REPO" \
+        --repo       "$LOCAL_REPO" \
+        --base       "$BASE_OID"   \
+        --head       "$HEAD_OID"   \
+        --pr-number  "$NUMBER"     \
+        --author     "$AUTHOR"     \
+        --pr-body    "$BODY"       \
+        --format     json          \
+        2>/dev/null) && EXIT_CODE=0 || EXIT_CODE=$?
+
+    if [[ $EXIT_CODE -ne 0 ]]; then
+        echo "[ERROR: bounce returned $EXIT_CODE]"
+        ERRORS=$((ERRORS + 1))
+        INDEX=$((INDEX + 1))
+        continue
+    fi
+
+    # ── Parse score components ─────────────────────────────────────────────────
+    SCORE=$(  echo "$RESULT" | jq -r '.slop_score         // 0')
+    DEAD=$(   echo "$RESULT" | jq -r '.dead_symbols_added // 0')
+    CLONES=$( echo "$RESULT" | jq -r '.logic_clones_found // 0')
+    ZOMBIES=$(echo "$RESULT" | jq -r '.zombie_symbols_added // 0')
+    ANTI=$(   echo "$RESULT" | jq -r '.antipatterns_found // 0')
+    CVIOL=$(  echo "$RESULT" | jq -r '.comment_violations // 0')
+    UNLINK=$( echo "$RESULT" | jq -r '.unlinked_pr        // 0')
+
+    FLAGS=""
+    [[ "$UNLINK" == "1"    ]] && FLAGS="${FLAGS}${YLW}[NO-ISSUE]${NC} "
+    [[ "$CVIOL"  -gt 0 ]] 2>/dev/null && FLAGS="${FLAGS}${RED}[COMMENT×${CVIOL}]${NC} "
+    [[ "$ANTI"   -gt 0 ]] 2>/dev/null && FLAGS="${FLAGS}${RED}[ANTI×${ANTI}]${NC} "
+    [[ "$DEAD"   -gt 0 ]] 2>/dev/null && FLAGS="${FLAGS}${DIM}[DEAD×${DEAD}]${NC} "
+    [[ "$CLONES" -gt 0 ]] 2>/dev/null && FLAGS="${FLAGS}${DIM}[CLONE×${CLONES}]${NC} "
+    [[ "$ZOMBIES" -gt 0 ]] 2>/dev/null && FLAGS="${FLAGS}${DIM}[ZMB×${ZOMBIES}]${NC} "
+
+    printf "score=%-4s  %b\n" "$SCORE" "${FLAGS:-${GRN}CLEAN${NC}}"
+
+    # ── Running totals ─────────────────────────────────────────────────────────
+    PROCESSED=$((PROCESSED + 1))
+    [[ "$UNLINK" == "1" ]] && UNLINKED_COUNT=$((UNLINKED_COUNT + 1))
+    [[ "$CVIOL" -gt 0 ]] 2>/dev/null && COMMENT_VIOLATIONS=$((COMMENT_VIOLATIONS + CVIOL))
+    if [[ "$SCORE" -gt "$HIGH_SCORE" ]] 2>/dev/null; then
+        HIGH_SCORE=$SCORE; HIGH_PR=$NUMBER
+    fi
+
+    INDEX=$((INDEX + 1))
+done < <(jq -c '.[]' "$CACHE_FILE")
+
+# ── Grand Slam summary ────────────────────────────────────────────────────────
+echo ""
+echo -e "${GRN}══════════════════════════════════════════════════${NC}"
+echo   "  Grand Slam complete"
+echo   "  PRs processed      : $PROCESSED"
+echo   "  PRs skipped        : $SKIPPED  (fetch failed / OID mismatch)"
+echo   "  Errors             : $ERRORS"
+echo   "  OIDs freshly fetched: $FETCHED_COUNT  (rest were already local)"
+echo   "  Unlinked PRs       : $UNLINKED_COUNT"
+echo   "  Comment violations : $COMMENT_VIOLATIONS"
+[[ "$HIGH_PR" -gt 0 ]] && echo "  Highest slop score : $HIGH_SCORE  (PR #$HIGH_PR)"
+echo -e "${GRN}══════════════════════════════════════════════════${NC}"
+echo ""
+
+# ── Generate global intelligence report ──────────────────────────────────────
+REPORT_OUT="${2:-grand_slam_report.md}"
+info "Generating report → $REPORT_OUT"
+"$JANITOR" report \
+    --repo   "$LOCAL_REPO" \
+    --top    50            \
+    --format markdown      \
+    --out    "$REPORT_OUT"
+info "Done. Grand Slam report: $REPORT_OUT"
+info "Hint: run 'janitor report --global --gauntlet ~/dev/gauntlet/' for cross-repo aggregation."

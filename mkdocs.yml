@@ -25,7 +25,6 @@ nav:
   - Pricing: pricing.md
   - Case Studies:
     - Godot Engine: case-studies/godot.md
-    - Godot Slop Audit: godot_slop_audit.md
   - Governance:
     - Licensing (BUSL-1.1): licensing.md
     - Token Gate: sovereignty/tokens.md

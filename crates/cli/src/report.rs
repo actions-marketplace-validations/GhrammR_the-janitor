@@ -501,6 +501,211 @@ pub fn render_scan_json(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Global multi-repo report
+// ---------------------------------------------------------------------------
+
+/// Per-repository aggregate stats for the `--global` cross-repo report.
+pub struct RepoStats {
+    /// Repository name (directory base name).
+    pub repo_name: String,
+    /// Number of PRs with bounce log entries.
+    pub pr_count: usize,
+    /// Sum of all slop scores across all entries.
+    pub total_slop_score: u64,
+    /// Sum of antipatterns found across all entries.
+    pub antipatterns_found: u32,
+    /// Count of entries that have at least one zombie dependency.
+    pub zombie_dep_prs: u32,
+    /// Sum of dead symbols added across all entries.
+    pub dead_symbols_added: u32,
+    /// PR number with the highest slop score in this repo.
+    pub highest_pr: Option<u64>,
+    /// Highest slop score seen in this repo.
+    pub highest_score: u32,
+}
+
+/// Aggregated cross-repository data for `--global` report.
+pub struct GlobalReportData {
+    /// Per-repo stats, sorted by `total_slop_score` descending.
+    pub repos: Vec<RepoStats>,
+    /// Total PRs across all repos.
+    pub total_prs: usize,
+    /// Total slop score across all repos.
+    pub total_slop_score: u64,
+    /// Total antipatterns across all repos.
+    pub total_antipatterns: u32,
+}
+
+/// Discover all bounce logs one directory level beneath `gauntlet_root`.
+///
+/// Scans `<gauntlet_root>/*/janitor/bounce_log.ndjson`. Returns a list
+/// of `(repo_name, entries)` pairs, sorted alphabetically by repo name.
+/// Repos with no entries are omitted.
+pub fn discover_bounce_logs(gauntlet_root: &Path) -> Vec<(String, Vec<BounceLogEntry>)> {
+    let Ok(dir_iter) = std::fs::read_dir(gauntlet_root) else {
+        return Vec::new();
+    };
+    let mut results: Vec<(String, Vec<BounceLogEntry>)> = dir_iter
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let janitor_dir = path.join(".janitor");
+            if !janitor_dir.is_dir() {
+                return None;
+            }
+            let log = load_bounce_log(&janitor_dir);
+            if log.is_empty() {
+                return None;
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            Some((name, log))
+        })
+        .collect();
+    results.sort_by(|(a, _), (b, _)| a.cmp(b));
+    results
+}
+
+/// Aggregates per-repo bounce log entries into a [`GlobalReportData`].
+pub fn aggregate_global(repos: Vec<(String, Vec<BounceLogEntry>)>) -> GlobalReportData {
+    let mut repo_stats: Vec<RepoStats> = repos
+        .into_iter()
+        .map(|(repo_name, entries)| {
+            let pr_count = entries.len();
+            let total_slop_score: u64 = entries.iter().map(|e| e.slop_score as u64).sum();
+            let antipatterns_found: u32 = entries.iter().map(|e| e.antipatterns_found).sum();
+            let dead_symbols_added: u32 = entries.iter().map(|e| e.dead_symbols_added).sum();
+            let zombie_dep_prs: u32 = entries
+                .iter()
+                .filter(|e| !e.zombie_deps.is_empty())
+                .count() as u32;
+            let (highest_score, highest_pr) =
+                entries.iter().fold((0u32, None), |(hs, hp), e| {
+                    if e.slop_score > hs {
+                        (e.slop_score, e.pr_number)
+                    } else {
+                        (hs, hp)
+                    }
+                });
+            RepoStats {
+                repo_name,
+                pr_count,
+                total_slop_score,
+                antipatterns_found,
+                dead_symbols_added,
+                zombie_dep_prs,
+                highest_pr,
+                highest_score,
+            }
+        })
+        .collect();
+
+    // Sort by cumulative slop score descending — worst repos first.
+    repo_stats.sort_by(|a, b| b.total_slop_score.cmp(&a.total_slop_score));
+
+    let total_prs: usize = repo_stats.iter().map(|r| r.pr_count).sum();
+    let total_slop_score: u64 = repo_stats.iter().map(|r| r.total_slop_score).sum();
+    let total_antipatterns: u32 = repo_stats.iter().map(|r| r.antipatterns_found).sum();
+
+    GlobalReportData {
+        repos: repo_stats,
+        total_prs,
+        total_slop_score,
+        total_antipatterns,
+    }
+}
+
+/// Renders the global cross-repository report as GitHub-flavored Markdown.
+pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> String {
+    let mut out = String::with_capacity(4096);
+
+    out.push_str("# Janitor Global Intelligence Report\n\n");
+    out.push_str(
+        "*Cross-repository structural debt aggregation. \
+         Generated by The Janitor: Deterministic Structural Analysis.*\n\n",
+    );
+    out.push_str(&format!("**Gauntlet root**: `{}`\n\n", gauntlet_root));
+    out.push_str("---\n\n");
+
+    // ── Global summary table ───────────────────────────────────────────────
+    out.push_str("## Global Summary\n\n");
+    out.push_str("| Metric | Value |\n");
+    out.push_str("|--------|-------|\n");
+    out.push_str(&format!(
+        "| Repositories analyzed | {} |\n",
+        data.repos.len()
+    ));
+    out.push_str(&format!("| Total PRs analyzed | {} |\n", data.total_prs));
+    out.push_str(&format!(
+        "| Total slop score blocked | {} |\n",
+        data.total_slop_score
+    ));
+    out.push_str(&format!(
+        "| Total antipatterns detected | {} |\n",
+        data.total_antipatterns
+    ));
+    out.push('\n');
+
+    // ── Per-repo breakdown ─────────────────────────────────────────────────
+    out.push_str("## Repository Breakdown\n\n");
+    out.push_str(
+        "| Repository | PRs | Total Slop | Antipatterns \
+         | Dead Added | Zombie Dep PRs | Worst PR |\n",
+    );
+    out.push_str(
+        "|------------|-----|-----------|--------------|------------|----------------|----------|\n",
+    );
+    for repo in &data.repos {
+        let worst = repo
+            .highest_pr
+            .map(|n| format!("#{} (score {})", n, repo.highest_score))
+            .unwrap_or_else(|| "-".to_owned());
+        out.push_str(&format!(
+            "| `{}` | {} | **{}** | {} | {} | {} | {} |\n",
+            repo.repo_name,
+            repo.pr_count,
+            repo.total_slop_score,
+            repo.antipatterns_found,
+            repo.dead_symbols_added,
+            repo.zombie_dep_prs,
+            worst,
+        ));
+    }
+    out.push('\n');
+
+    out
+}
+
+/// Renders the global cross-repository report as structured JSON.
+pub fn render_global_json(data: &GlobalReportData, gauntlet_root: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": "6.8.0",
+        "gauntlet_root": gauntlet_root,
+        "total_repos": data.repos.len(),
+        "total_prs": data.total_prs,
+        "total_slop_score": data.total_slop_score,
+        "total_antipatterns": data.total_antipatterns,
+        "repositories": data.repos.iter().map(|r| {
+            serde_json::json!({
+                "repo_name": r.repo_name,
+                "pr_count": r.pr_count,
+                "total_slop_score": r.total_slop_score,
+                "antipatterns_found": r.antipatterns_found,
+                "dead_symbols_added": r.dead_symbols_added,
+                "zombie_dep_prs": r.zombie_dep_prs,
+                "highest_pr": r.highest_pr,
+                "highest_score": r.highest_score,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
 /// Format byte count as human-readable (KB/MB).
 fn fmt_bytes(b: u64) -> String {
     if b >= 1_048_576 {
