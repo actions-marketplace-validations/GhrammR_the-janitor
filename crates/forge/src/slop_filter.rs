@@ -19,6 +19,7 @@
 //! ```text
 //! SlopScore = (dead_symbols_added × 10) + (logic_clones_found × 5)
 //!           + (zombie_symbols_added × 15) + (antipatterns_found × 50)
+//!           + (hallucinated_security_fix × 100)
 //! ```
 //! Dead-symbol additions (×10) penalise name-based re-introduction.
 //! Logic clones (×5) penalise structural duplication within the patch (exact BLAKE3 or fuzzy
@@ -44,12 +45,13 @@ use common::registry::SymbolRegistry;
 ///
 /// ## Formula
 /// ```text
-/// score = (dead_symbols_added  × 10)
-///       + (logic_clones_found  ×  5)
-///       + (zombie_symbols_added × 15)
-///       + (antipatterns_found  × 50)
-///       + (comment_violations  ×  5)
-///       + (unlinked_pr         × 20)
+/// score = (dead_symbols_added      × 10)
+///       + (logic_clones_found      ×  5)
+///       + (zombie_symbols_added    × 15)
+///       + (antipatterns_found      × 50)
+///       + (comment_violations      ×  5)
+///       + (unlinked_pr             × 20)
+///       + (hallucinated_security_fix × 100)
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SlopScore {
@@ -102,6 +104,17 @@ pub struct SlopScore {
     ///
     /// Populated in patch mode only; empty in git-native mode.
     pub comment_violation_details: Vec<String>,
+
+    /// `1` if the PR was flagged as a Hallucinated Security Fix, `0` otherwise.
+    ///
+    /// Detected by [`crate::metadata::detect_hallucinated_fix`] when the PR body
+    /// contains security-claim keywords (`CVE-<N>`, `buffer overflow`, `RCE`, etc.)
+    /// but every changed file has a non-code extension (`.md`, `.json`, `.png`, …).
+    ///
+    /// This is an adversarial signal — it indicates the PR description was crafted
+    /// to exploit security-scanner bypass heuristics without shipping actual fixes.
+    /// Carries a fixed penalty of ×100 — the highest per-finding weight.
+    pub hallucinated_security_fix: u32,
 }
 
 impl SlopScore {
@@ -116,6 +129,7 @@ impl SlopScore {
             + self.antipatterns_found * 50
             + self.comment_violations * 5
             + self.unlinked_pr * 20
+            + self.hallucinated_security_fix * 100
     }
 
     /// Returns `true` when no slop was detected.
@@ -126,6 +140,7 @@ impl SlopScore {
             && self.antipatterns_found == 0
             && self.comment_violations == 0
             && self.unlinked_pr == 0
+            && self.hallucinated_security_fix == 0
     }
 }
 
@@ -462,6 +477,62 @@ impl PRBouncer for PatchBouncer {
 // ---------------------------------------------------------------------------
 // GitBouncer — shadow_git-backed PR analysis
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Hallucinated-security-fix integration helpers
+// ---------------------------------------------------------------------------
+
+/// Extract all unique file extensions from every `+++ b/<path>` header in a
+/// unified diff.
+///
+/// Unlike the private [`extract_patch_ext`] which returns only the first
+/// extension, this function collects one entry per changed file.  Extensionless
+/// files (e.g. `LICENSE`, `OWNERS`) produce an empty-string entry `""`.
+///
+/// The returned `Vec` is deduplicated but unordered.
+pub fn extract_all_patch_exts(patch: &str) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    for line in patch.lines() {
+        if let Some(path) = line
+            .strip_prefix("+++ b/")
+            .or_else(|| line.strip_prefix("+++ "))
+        {
+            let path = path.trim();
+            // Skip /dev/null (deleted-file sentinel).
+            if path == "/dev/null" {
+                continue;
+            }
+            // Take the last path component then its extension.
+            let filename = path.rsplit('/').next().unwrap_or(path);
+            let ext = filename
+                .rfind('.')
+                .map(|i| filename[i + 1..].to_string())
+                .unwrap_or_default(); // "" for files without extension
+            seen.insert(ext);
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// Apply the hallucinated-security-fix check to an existing [`SlopScore`].
+///
+/// Called by `cmd_bounce` after the main slop analysis, with the PR body and
+/// the list of unique changed file extensions (from the patch headers or the
+/// [`MergeSnapshot`](crate::shadow_git::MergeSnapshot) blob map).
+///
+/// When a hallucinated fix is detected:
+/// - `score.hallucinated_security_fix` is set to `1` (+100 pts).
+/// - The human-readable description is appended to `score.antipattern_details`
+///   so it surfaces in the bounce output alongside other antipatterns.
+///
+/// This function is a no-op when `pr_body` is empty or no security keyword is
+/// found, so it is always safe to call unconditionally.
+pub fn check_hallucinated_fix(score: &mut SlopScore, pr_body: &str, changed_exts: &[String]) {
+    if let Some(finding) = crate::metadata::detect_hallucinated_fix(pr_body, changed_exts) {
+        score.hallucinated_security_fix = 1;
+        score.antipattern_details.push(finding.description);
+    }
+}
 
 /// Extract per-file added content from a unified diff.
 ///
@@ -869,6 +940,97 @@ mod tests {
             "protected hash match counts as global logic clone"
         );
         assert_eq!(score.score(), 5);
+    }
+
+    // --- Hallucinated security fix ---
+
+    #[test]
+    fn test_hallucinated_fix_cve_readme_only() {
+        // The canonical test case from the mission mandate.
+        let pr_body = "Fixes CVE-2026-9999: critical buffer overflow in the auth module.";
+        let changed_exts = vec!["md".to_string()];
+        let mut score = SlopScore::default();
+        check_hallucinated_fix(&mut score, pr_body, &changed_exts);
+        assert_eq!(
+            score.hallucinated_security_fix, 1,
+            "CVE claim + only README.md changed → hallucinated security fix"
+        );
+        assert_eq!(
+            score.score(),
+            100,
+            "hallucinated fix carries a 100-point penalty"
+        );
+        assert!(!score.is_clean());
+        assert_eq!(score.antipattern_details.len(), 1);
+        assert!(score.antipattern_details[0].contains("Hallucinated Security Fix"));
+    }
+
+    #[test]
+    fn test_hallucinated_fix_not_triggered_with_code_file() {
+        let pr_body = "Fixes CVE-2026-9999: buffer overflow in allocator.";
+        let changed_exts = vec!["rs".to_string(), "md".to_string()];
+        let mut score = SlopScore::default();
+        check_hallucinated_fix(&mut score, pr_body, &changed_exts);
+        assert_eq!(
+            score.hallucinated_security_fix, 0,
+            "Rust file present — legitimate fix, must not flag"
+        );
+        assert_eq!(score.score(), 0);
+    }
+
+    #[test]
+    fn test_hallucinated_fix_no_security_keyword() {
+        let pr_body = "Update README with installation instructions.";
+        let changed_exts = vec!["md".to_string()];
+        let mut score = SlopScore::default();
+        check_hallucinated_fix(&mut score, pr_body, &changed_exts);
+        assert_eq!(
+            score.hallucinated_security_fix, 0,
+            "no security keyword → no flag"
+        );
+    }
+
+    #[test]
+    fn test_hallucinated_fix_json_and_yaml_only() {
+        let pr_body = "Patches a memory leak in the connection pool configuration.";
+        let changed_exts = vec!["json".to_string(), "yaml".to_string()];
+        let mut score = SlopScore::default();
+        check_hallucinated_fix(&mut score, pr_body, &changed_exts);
+        assert_eq!(
+            score.hallucinated_security_fix, 1,
+            "json+yaml only → hallucinated"
+        );
+    }
+
+    #[test]
+    fn test_extract_all_patch_exts_multi_file() {
+        let patch = concat!(
+            "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+            "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            "--- a/config.json\n+++ b/config.json\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let mut exts = extract_all_patch_exts(patch);
+        exts.sort();
+        assert_eq!(exts, vec!["json", "md", "rs"]);
+    }
+
+    #[test]
+    fn test_extract_all_patch_exts_extensionless() {
+        let patch = "--- a/LICENSE\n+++ b/LICENSE\n@@ -1 +1 @@\n-old\n+new\n";
+        let exts = extract_all_patch_exts(patch);
+        assert_eq!(exts, vec![""], "LICENSE has no extension → empty string");
+    }
+
+    #[test]
+    fn test_hallucinated_fix_score_formula() {
+        // Verify the new ×100 weight integrates correctly with other fields.
+        let s = SlopScore {
+            dead_symbols_added: 1,        // +10
+            hallucinated_security_fix: 1, // +100
+            ..SlopScore::default()
+        };
+        assert_eq!(s.score(), 110);
+        assert!(!s.is_clean());
     }
 
     #[test]

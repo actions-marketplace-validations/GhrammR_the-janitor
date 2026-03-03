@@ -36,6 +36,126 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use tree_sitter::{Node, Parser};
 
 // ---------------------------------------------------------------------------
+// Hallucinated-security-fix detector
+// ---------------------------------------------------------------------------
+
+/// Security-claim keywords that trigger hallucinated-fix detection.
+///
+/// Matched case-insensitively against the PR body.  `"CVE-"` has an additional
+/// suffix constraint: at least one ASCII digit must immediately follow the
+/// matched text (e.g. `"CVE-2026-9999"`) to avoid false positives on prose
+/// that says "like CVE-reporting processes".
+const SECURITY_KEYWORDS: &[&str] = &[
+    "CVE-",
+    "buffer overflow",
+    "memory leak",
+    "RCE",
+    "vulnerability",
+    "exploit",
+    "XSS",
+    "SQLi",
+];
+
+/// File extensions that are definitively non-code.
+///
+/// A PR that changes *only* files with these extensions cannot plausibly be
+/// fixing a buffer overflow, use-after-free, or similar memory-safety issue —
+/// regardless of what its description claims.
+///
+/// The empty string `""` captures extensionless files (e.g. `LICENSE`, `OWNERS`,
+/// `CODEOWNERS`, `NOTICE`) which are also non-code.
+const NON_CODE_EXTENSIONS: &[&str] = &[
+    "md", "txt", "png", "jpg", "jpeg", "gif", "svg", "webp", "json", "yaml", "yml", "toml", "lock",
+    "sum", "csv", "xml", "", // extensionless files: LICENSE, OWNERS, CODEOWNERS, NOTICE, etc.
+];
+
+static SECURITY_AC: OnceLock<AhoCorasick> = OnceLock::new();
+
+fn security_ac() -> &'static AhoCorasick {
+    SECURITY_AC.get_or_init(|| {
+        AhoCorasickBuilder::new()
+            .ascii_case_insensitive(true)
+            .build(SECURITY_KEYWORDS)
+            .expect("static security keyword patterns are valid")
+    })
+}
+
+/// Detect a "Hallucinated Security Fix" — a PR whose description contains
+/// high-stakes security language but whose changed files are all non-code.
+///
+/// ## The Pattern
+///
+/// AI-generated PRs sometimes claim to fix CVEs or vulnerabilities while only
+/// modifying markdown documentation, JSON configs, or image assets — file types
+/// that cannot contain a buffer overflow patch.  This detector catches that
+/// mismatch before the PR reaches a human reviewer.
+///
+/// ## Trigger Conditions
+///
+/// Returns `Some(SlopFinding)` when **both** of the following hold:
+///
+/// 1. `body` contains a security keyword: `CVE-<digits>`, `"buffer overflow"`,
+///    `"memory leak"`, `"RCE"`, `"vulnerability"`, `"exploit"`, `"XSS"`, or `"SQLi"`.
+/// 2. Every extension in `file_extensions` belongs to the non-code set:
+///    `md`, `txt`, `png`, `jpg`, `json`, `yaml`, `toml`, `lock`, or `""` (no extension).
+///
+/// Returns `None` when either condition is absent (no security claim, or at
+/// least one code file is present in the changeset).
+pub fn detect_hallucinated_fix(
+    body: &str,
+    file_extensions: &[String],
+) -> Option<crate::slop_hunter::SlopFinding> {
+    // Guard: nothing to flag on an empty body or empty changeset.
+    if body.is_empty() || file_extensions.is_empty() {
+        return None;
+    }
+
+    // Locate the first security keyword in the PR body.
+    let ac = security_ac();
+    let mut matched_keyword: Option<&str> = None;
+    for mat in ac.find_iter(body) {
+        let kw = SECURITY_KEYWORDS[mat.pattern().as_usize()];
+        // "CVE-" requires at least one ASCII digit immediately after the match
+        // to avoid matching "CVE-reporting processes", "CVE-adjacent" etc.
+        if kw.eq_ignore_ascii_case("CVE-") {
+            let after = &body[mat.end()..];
+            if !after
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+        }
+        matched_keyword = Some(kw);
+        break;
+    }
+    let keyword = matched_keyword?;
+
+    // Verify that every changed file extension is non-code.
+    let all_non_code = file_extensions.iter().all(|ext| {
+        let ext = ext.trim_start_matches('.');
+        NON_CODE_EXTENSIONS.contains(&ext)
+    });
+
+    if !all_non_code {
+        return None; // At least one code file changed — legitimate fix.
+    }
+
+    Some(crate::slop_hunter::SlopFinding {
+        start_byte: 0,
+        end_byte: 0,
+        description: format!(
+            "Hallucinated Security Fix: PR body claims '{}' but only non-code files \
+             changed ({}). A real security fix requires modifying source code.",
+            keyword,
+            file_extensions.join(", ")
+        ),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Banned phrase catalogue
 // ---------------------------------------------------------------------------
 
@@ -497,6 +617,76 @@ diff --git a/src/lib.rs b/src/lib.rs
     fn test_pr_unlinked_mention_without_number() {
         // "closes" appears but no `#N` follows.
         assert!(scanner().is_pr_unlinked("This closes the debate about naming."));
+    }
+
+    // --- Hallucinated security fix detection ---
+
+    #[test]
+    fn test_hallucinated_fix_cve_readme_only() {
+        let body = "Fixes CVE-2026-9999: critical buffer overflow in auth module.";
+        let exts = vec!["md".to_string()];
+        let finding = detect_hallucinated_fix(body, &exts);
+        assert!(finding.is_some(), "CVE claim + only .md → hallucinated fix");
+        let desc = finding.unwrap().description;
+        assert!(desc.contains("Hallucinated Security Fix"));
+        assert!(desc.contains("CVE-"));
+    }
+
+    #[test]
+    fn test_hallucinated_fix_not_triggered_with_code_file() {
+        let body = "Fixes CVE-2026-9999: critical buffer overflow.";
+        let exts = vec!["rs".to_string(), "md".to_string()];
+        assert!(
+            detect_hallucinated_fix(body, &exts).is_none(),
+            "code file present — should not flag"
+        );
+    }
+
+    #[test]
+    fn test_hallucinated_fix_no_keyword() {
+        let body = "Update README with better installation instructions.";
+        let exts = vec!["md".to_string()];
+        assert!(
+            detect_hallucinated_fix(body, &exts).is_none(),
+            "no security keyword → no flag"
+        );
+    }
+
+    #[test]
+    fn test_hallucinated_fix_cve_without_digit_suffix() {
+        // "CVE-" not followed by a digit — must not match.
+        let body = "Follow the CVE-reporting process for disclosure.";
+        let exts = vec!["md".to_string()];
+        assert!(
+            detect_hallucinated_fix(body, &exts).is_none(),
+            "CVE- not followed by digit — no flag"
+        );
+    }
+
+    #[test]
+    fn test_hallucinated_fix_various_keywords() {
+        let non_code = vec!["json".to_string(), "yaml".to_string()];
+        let bodies = [
+            (
+                "buffer overflow",
+                "This PR fixes a buffer overflow in the config parser.",
+            ),
+            ("memory leak", "Patch for a memory leak in the allocator."),
+            ("RCE", "Fix RCE in the API endpoint."),
+            ("XSS", "Mitigation for XSS in the frontend."),
+            ("SQLi", "Closes SQLi in the database layer."),
+            ("vulnerability", "Fixes a critical vulnerability in login."),
+        ];
+        for (kw, body) in &bodies {
+            let finding = detect_hallucinated_fix(body, &non_code);
+            assert!(finding.is_some(), "should flag keyword '{kw}' in: {body}");
+        }
+    }
+
+    #[test]
+    fn test_hallucinated_fix_empty_inputs() {
+        assert!(detect_hallucinated_fix("", &["md".to_string()]).is_none());
+        assert!(detect_hallucinated_fix("Fixes CVE-2026-1 buffer overflow", &[]).is_none());
     }
 
     // --- Source scanning (tree-sitter) ---

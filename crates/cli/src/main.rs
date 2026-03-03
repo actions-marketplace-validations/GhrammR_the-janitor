@@ -2017,11 +2017,29 @@ fn cmd_bounce(
         (Some(repo_path), Some(base_sha), Some(head_sha)) => {
             // Git-native mode: shadow_git blob extraction.
             // bounce_git now returns (SlopScore, HashMap<PathBuf, Vec<u8>>).
-            let (score, blobs) = bounce_git(repo_path, base_sha, head_sha, &registry)?;
+            let (mut score, blobs) = bounce_git(repo_path, base_sha, head_sha, &registry)?;
             let merkle_key = format!("{repo_path:?}:{base_sha}:{head_sha}");
             let merkle_root = blake3::hash(merkle_key.as_bytes()).to_hex().to_string();
             // Derive MinHash from the deterministic merkle key (no raw patch in git mode).
             let sig = forge::pr_collider::PrDeltaSignature::from_bytes(merkle_root.as_bytes());
+            // Hallucinated security fix check (git mode — extensions from snapshot blobs).
+            if let Some(body) = pr_body {
+                let exts: Vec<String> = {
+                    use std::collections::HashSet;
+                    blobs
+                        .keys()
+                        .map(|p| {
+                            p.extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("")
+                                .to_string()
+                        })
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect()
+                };
+                forge::slop_filter::check_hallucinated_fix(&mut score, body, &exts);
+            }
             (score, merkle_root, sig.min_hashes.to_vec(), blobs)
         }
         _ => {
@@ -2054,6 +2072,9 @@ fn cmd_bounce(
                 if scanner.is_pr_unlinked(body) {
                     score.unlinked_pr = 1;
                 }
+                // Hallucinated security fix check (patch mode — all +++ b/ headers).
+                let changed_exts = forge::slop_filter::extract_all_patch_exts(&patch);
+                forge::slop_filter::check_hallucinated_fix(&mut score, body, &changed_exts);
             }
 
             // Extract per-file blobs from the unified diff for the zombie dep scan.
@@ -2086,7 +2107,7 @@ fn cmd_bounce(
 
     if format == "json" {
         let json_out = serde_json::json!({
-            "schema_version": "6.8.0",
+            "schema_version": "6.9.0",
             "slop_score": score.score() as f64,
             "dead_symbols_added": score.dead_symbols_added,
             "logic_clones_found": score.logic_clones_found,
@@ -2096,6 +2117,7 @@ fn cmd_bounce(
             "comment_violations": score.comment_violations,
             "comment_violation_details": score.comment_violation_details,
             "unlinked_pr": score.unlinked_pr,
+            "hallucinated_security_fix": score.hallucinated_security_fix,
             "merkle_root": merkle_root,
         });
         println!(
@@ -2114,6 +2136,10 @@ fn cmd_bounce(
         println!("| Antipatterns     : {:>20} |", score.antipatterns_found);
         println!("| Comment violations: {:>19} |", score.comment_violations);
         println!("| Unlinked PR      : {:>20} |", score.unlinked_pr);
+        println!(
+            "| Hallucinated fix : {:>20} |",
+            score.hallucinated_security_fix
+        );
         println!("+------------------------------------------+");
         println!("  Merkle root: {}...", &merkle_root[..32]);
         println!();
