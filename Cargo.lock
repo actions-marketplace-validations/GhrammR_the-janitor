@@ -25,7 +25,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "anatomist"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -327,7 +327,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
 name = "cli"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "anatomist",
  "anyhow",
@@ -362,7 +362,7 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
 name = "common"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "dashboard"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "common",
  "crossterm 0.28.1",
@@ -865,7 +865,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forge"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -878,6 +878,7 @@ dependencies = [
  "rkyv",
  "thiserror 2.0.18",
  "tree-sitter",
+ "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
  "tree-sitter-cpp",
@@ -949,9 +950,9 @@ dependencies = [
 
 [[package]]
 name = "git2"
-version = "0.19.0"
+version = "0.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b903b73e45dc0c6c596f2d37eccece7c1c8bb6e4407b001096387c63d0d93724"
+checksum = "7b88256088d75a56f8ecfa070513a775dd9107f6530ef14919dac831af9cfe2b"
 dependencies = [
  "bitflags 2.11.0",
  "libc",
@@ -1243,9 +1244,9 @@ checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
 name = "libgit2-sys"
-version = "0.17.0+1.8.1"
+version = "0.18.3+1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10472326a8a6477c3c20a64547b0059e4b0d086869eee31e6d7da728a8eb7224"
+checksum = "c9b3acc4b91781bb0b3386669d325163746af5f6e4f73e6d2d630e09a35f3487"
 dependencies = [
  "cc",
  "libc",
@@ -1350,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "anatomist",
  "anyhow",
@@ -1409,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "mint-token"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1721,9 +1722,10 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "polyglot"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "tree-sitter",
+ "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
  "tree-sitter-cpp",
@@ -1968,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "reaper"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2242,7 +2244,7 @@ dependencies = [
 
 [[package]]
 name = "shadow"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "anyhow",
  "junction",
@@ -2684,6 +2686,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-bash"
+version = "0.23.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "329a4d48623ac337d42b1df84e81a1c9dbb2946907c102ca72db158c1964a52e"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-c"
 version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2918,7 +2930,7 @@ dependencies = [
 
 [[package]]
 name = "vault"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -3391,7 +3403,7 @@ dependencies = [
 
 [[package]]
 name = "wisdom-bake"
-version = "6.8.0"
+version = "6.9.0"
 dependencies = [
  "anyhow",
  "common",

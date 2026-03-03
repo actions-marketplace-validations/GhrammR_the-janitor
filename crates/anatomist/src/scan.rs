@@ -92,25 +92,46 @@ pub fn grep_shield(dead_names: &[&str], project_root: &Path) -> anyhow::Result<H
 
 /// Returns `true` if the path should be excluded from grep scanning.
 ///
+/// Checks **every path component**, not just the file name, so that paths
+/// *inside* excluded directories are blocked even when called directly
+/// (e.g. from the Rust cross-file shield or bridge extractor).
+///
 /// Used by both the grep shield (`scan.rs`) and the bridge extractor (`bridge.rs`).
 pub(crate) fn is_scan_excluded(path: &Path) -> bool {
+    if path.components().any(|c| {
+        if let std::path::Component::Normal(name) = c {
+            if let Some(s) = name.to_str() {
+                return matches!(
+                    s,
+                    "__pycache__"
+                        | ".git"
+                        | ".janitor"
+                        | "venv"
+                        | ".venv"
+                        | "target"
+                        | "node_modules"
+                        | ".pytest_cache"
+                        | "site"
+                        | "dist"
+                        | "build"
+                        | "compiled" // Next.js minified bundles (.next/server/compiled/)
+                        | "deps" // Redis / C submodule directories
+                        | "vendor" // vendored third-party copies
+                        | "thirdparty" // explicit third-party subtrees
+                );
+            }
+        }
+        false
+    }) {
+        return true;
+    }
+    // Generated and minified file exclusions (file name only).
+    // *.pb.go / *.pb.rs — protobuf-generated code.
+    // *.min.js — minified JavaScript bundles.
     path.file_name()
         .and_then(|s| s.to_str())
         .map(|name| {
-            matches!(
-                name,
-                "__pycache__"
-                    | ".git"
-                    | ".janitor"
-                    | "venv"
-                    | ".venv"
-                    | "target"
-                    | "node_modules"
-                    | ".pytest_cache"
-                    | "site"
-                    | "dist"
-                    | "build"
-            )
+            name.ends_with(".pb.go") || name.ends_with(".pb.rs") || name.ends_with(".min.js")
         })
         .unwrap_or(false)
 }
@@ -400,6 +421,55 @@ mod tests {
         );
 
         fs::remove_dir_all(tmp).ok();
+    }
+
+    #[test]
+    fn test_is_scan_excluded_new_dirs() {
+        assert!(is_scan_excluded(Path::new("compiled")));
+        assert!(is_scan_excluded(Path::new("deps")));
+        assert!(!is_scan_excluded(Path::new("src")));
+    }
+
+    #[test]
+    fn test_is_scan_excluded_generated_files() {
+        assert!(is_scan_excluded(Path::new("foo.pb.go")));
+        assert!(is_scan_excluded(Path::new("foo.pb.rs")));
+        assert!(is_scan_excluded(Path::new("bundle.min.js")));
+        assert!(!is_scan_excluded(Path::new("main.go")));
+        assert!(!is_scan_excluded(Path::new("main.js")));
+    }
+
+    #[test]
+    fn test_is_scan_excluded_full_path_component() {
+        // A file *inside* compiled/ must be excluded even when the full path is passed.
+        assert!(is_scan_excluded(Path::new("/repo/src/compiled/chunk.js")));
+        assert!(is_scan_excluded(Path::new(
+            "/repo/.next/server/compiled/runtime.js"
+        )));
+        assert!(is_scan_excluded(Path::new("/repo/vendor/deps/lib.c")));
+        // Normal paths must not be excluded.
+        assert!(!is_scan_excluded(Path::new("/repo/src/main.py")));
+        assert!(!is_scan_excluded(Path::new("/repo/app/views.py")));
+    }
+
+    #[test]
+    fn test_deeply_nested_blocklist() {
+        // Blocklisted directory anywhere in the path — not just the immediate parent.
+        assert!(is_scan_excluded(Path::new(
+            "src/internal/vendor/garbage.rs"
+        )));
+        assert!(is_scan_excluded(Path::new(
+            "packages/next/src/compiled/webpack/bundle.js"
+        )));
+        assert!(is_scan_excluded(Path::new("a/b/c/thirdparty/d/e.ts")));
+        assert!(is_scan_excluded(Path::new("repo/dep/node_modules/x/y.js")));
+        // Clean paths must not be excluded.
+        assert!(!is_scan_excluded(Path::new(
+            "src/internal/utils/helpers.rs"
+        )));
+        assert!(!is_scan_excluded(Path::new(
+            "packages/next/src/server/main.ts"
+        )));
     }
 
     #[test]

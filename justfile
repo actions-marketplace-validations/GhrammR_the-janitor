@@ -64,7 +64,11 @@ release version: audit (bump-version version)
 	git add .
 	git commit -m "chore: release v{{version}}"
 	git tag v{{version}}
-	git push origin HEAD:main --tags
+	# Floating major-version tag (@v6) — lets users pin to a major and
+	# always receive the latest stable patch without editing their workflows.
+	MAJOR="$(echo "{{version}}" | cut -d. -f1)" && git tag -fa "v${MAJOR}" -m "v${MAJOR} → v{{version}}"
+	git push origin HEAD:main "v{{version}}"
+	git push origin "v$(echo "{{version}}" | cut -d. -f1)" --force
 	"/mnt/c/Program Files/GitHub CLI/gh.exe" release create v{{version}} target/release/janitor \
 		--title "v{{version}} - The Industrial Pivot" \
 		--notes-file README.md \

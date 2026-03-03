@@ -590,6 +590,7 @@ fn cmd_scan(
             "slop_score": slop_score,
             "dead_symbols": result.dead.iter().map(|e| serde_json::json!({
                 "id": e.qualified_name,
+                "file_path": e.file_path,
                 "structural_hash": e.structural_hash.unwrap_or(0),
                 "reason": "DEAD_SYMBOL",
                 "byte_range": [e.start_byte, e.end_byte],
@@ -2091,7 +2092,9 @@ fn cmd_bounce(
             "logic_clones_found": score.logic_clones_found,
             "zombie_symbols_added": score.zombie_symbols_added,
             "antipatterns_found": score.antipatterns_found,
+            "antipattern_details": score.antipattern_details,
             "comment_violations": score.comment_violations,
+            "comment_violation_details": score.comment_violation_details,
             "unlinked_pr": score.unlinked_pr,
             "merkle_root": merkle_root,
         });

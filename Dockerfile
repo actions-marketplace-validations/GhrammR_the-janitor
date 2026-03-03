@@ -19,12 +19,10 @@ COPY crates/cli/Cargo.toml         crates/cli/Cargo.toml
 COPY crates/common/Cargo.toml      crates/common/Cargo.toml
 COPY crates/dashboard/Cargo.toml   crates/dashboard/Cargo.toml
 COPY crates/forge/Cargo.toml       crates/forge/Cargo.toml
-COPY crates/lazarus/Cargo.toml     crates/lazarus/Cargo.toml
 COPY crates/mcp/Cargo.toml         crates/mcp/Cargo.toml
-COPY crates/oracle/Cargo.toml      crates/oracle/Cargo.toml
+COPY crates/polyglot/Cargo.toml    crates/polyglot/Cargo.toml
 COPY crates/reaper/Cargo.toml      crates/reaper/Cargo.toml
 COPY crates/shadow/Cargo.toml      crates/shadow/Cargo.toml
-COPY crates/substrate/Cargo.toml   crates/substrate/Cargo.toml
 COPY crates/vault/Cargo.toml       crates/vault/Cargo.toml
 
 # Copy source and build only the CLI binary.

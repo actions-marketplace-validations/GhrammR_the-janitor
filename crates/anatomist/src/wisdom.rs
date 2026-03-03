@@ -421,6 +421,28 @@ pub fn classify(entities: &mut [Entity], source: &[u8], file_path: &str) {
             continue;
         }
 
+        // 2a-hook. Single-underscore lifecycle hook in dynamic language.
+        //
+        // Scoped to CLASS METHODS only (`parent_class.is_some()`): module-level
+        // `_`-prefixed functions are private-by-convention and may be dead code.
+        // Only class methods are invoked by frameworks via dynamic dispatch without
+        // appearing in any static import chain.
+        //
+        // Python: ALL `_`-prefixed class methods are protected — async frameworks
+        // dispatch both single-underscore and name-mangled `__attr` methods
+        // (Home Assistant, Django signals, Celery hooks, etc.).
+        // JS/TS/JSX/TSX: single-underscore convention only (`is_private` excludes
+        // double-underscore prefixes which are rare and static-analysis-tractable).
+        if entity.parent_class.is_some()
+            && ((file_path.ends_with(".py") && entity.name.starts_with('_'))
+                || (!file_path.ends_with(".py")
+                    && entity.is_private()
+                    && is_dynamic_lang(file_path)))
+        {
+            entity.protected_by = Some(Protection::LifecycleHook);
+            continue;
+        }
+
         // 2b-global. Global shield: framework-agnostic lifecycle / entry-point names.
         // Protects game-engine callbacks (Unity, Godot) and universal entry points.
         if GLOBAL_SHIELD_NAMES.contains(&entity.name.as_str()) {
@@ -558,6 +580,16 @@ pub fn classify(entities: &mut [Entity], source: &[u8], file_path: &str) {
 /// Returns true if `name` matches Qt's `on_<widget>_<signal>` auto-slot convention.
 fn is_qt_auto_slot(name: &str) -> bool {
     name.starts_with("on_") && name.len() > 3 && name[3..].contains('_')
+}
+
+/// Returns `true` for dynamic languages where single-underscore methods may be
+/// called by frameworks without appearing in any static import chain.
+#[inline]
+fn is_dynamic_lang(file_path: &str) -> bool {
+    matches!(
+        file_path.rsplit('.').next().unwrap_or(""),
+        "py" | "ts" | "tsx" | "js" | "jsx"
+    )
 }
 
 /// Returns the source bytes for an entity's byte range (clamped to file bounds).

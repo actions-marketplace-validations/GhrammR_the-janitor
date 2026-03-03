@@ -5,14 +5,17 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
-  pull-requests: write
+# Workflow-level: deny all by default.
+permissions: read-all
 
 jobs:
   slop-gate:
     name: Structural Firewall
     runs-on: ubuntu-latest
+    # Job-level: read PR diff + write step summary.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
@@ -24,34 +27,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch PR diff
-        run: |
-          gh pr diff "${{ github.event.pull_request.number }}" \
-            --repo "${{ github.repository }}" \
-            > /tmp/pr.patch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run Janitor bounce gate
-        uses: GhrammR/the-janitor@v6
+      # Dogfooding: run the composite action from the current branch so every
+      # PR to this repo is itself gated by the version of the action it carries.
+      - name: Janitor slop gate
+        id: janitor
+        uses: ./
         with:
-          args: bounce . --patch /tmp/pr.patch
-            --pr-number ${{ github.event.pull_request.number }}
-            --author ${{ github.event.pull_request.user.login }}
-            --format json
-          path: .
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_slop: 'true'
 
-      - name: Upload audit report
-        # Upload even on gate failure so reviewers can inspect the findings.
+      - name: Upload bounce log
+        # Always upload so reviewers can inspect findings even on gate failure.
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
-          name: janitor-audit-pr-${{ github.event.pull_request.number }}
-          path: |
-            godot_pr_audit.md
-            .janitor/bounce_log.ndjson
-            .janitor/bonds/
+          name: janitor-bounce-log-pr-${{ github.event.pull_request.number }}
+          path: .janitor/bounce_log.ndjson
           if-no-files-found: ignore
-          # Raw upload — no zip compression overhead.
           compression-level: 0
           retention-days: 30

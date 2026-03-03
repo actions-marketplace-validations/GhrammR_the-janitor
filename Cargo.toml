@@ -3,7 +3,7 @@ members = ["crates/*", "tools/wisdom-bake", "tools/mint-token"]
 resolver = "2"
 
 [workspace.package]
-version = "6.8.0"
+version = "6.9.0"
 edition = "2021"
 repository = "https://github.com/GhrammR/the-janitor"
 license = "BUSL-1.1"
@@ -38,6 +38,7 @@ tree-sitter-go = "0.23"
 tree-sitter-glsl = "0.2.0"
 tree-sitter-objc = "3.0.2"
 tree-sitter-yaml = "0.7.2"
+tree-sitter-bash = "0.23"
 
 # File System & Path Utilities
 memmap2 = "0.9"
@@ -66,7 +67,7 @@ ureq = { version = "2", features = ["json"] }
 arc-swap = "1.7"
 
 # Git integration (C binding to libgit2 — requires libgit2-dev in build env)
-git2 = "0.19"
+git2 = "0.20"
 
 # Progress reporting
 indicatif = "0.17"

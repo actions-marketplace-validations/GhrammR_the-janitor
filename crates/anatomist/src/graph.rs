@@ -687,25 +687,36 @@ fn walk_polyglot_files(
 }
 
 /// Returns `true` if the path should be excluded from walking (built-in set).
+///
+/// Checks **every path component**, not just the file name, so that entries
+/// *inside* excluded directories are caught even when a full path is passed
+/// directly (not via WalkDir's `filter_entry`).
 fn is_excluded(path: &Path) -> bool {
-    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-        matches!(
-            name,
-            "__pycache__"
-                | ".git"
-                | ".janitor"
-                | "venv"
-                | ".venv"
-                | "target"
-                | "node_modules"
-                | ".pytest_cache"
-                | "site"
-                | "dist"
-                | "build"
-        )
-    } else {
+    path.components().any(|c| {
+        if let std::path::Component::Normal(name) = c {
+            if let Some(s) = name.to_str() {
+                return matches!(
+                    s,
+                    "__pycache__"
+                        | ".git"
+                        | ".janitor"
+                        | "venv"
+                        | ".venv"
+                        | "target"
+                        | "node_modules"
+                        | ".pytest_cache"
+                        | "site"
+                        | "dist"
+                        | "build"
+                        | "compiled" // Next.js minified bundles (.next/server/compiled/)
+                        | "deps" // Redis / C submodule directories
+                        | "vendor" // vendored third-party copies
+                        | "thirdparty" // explicit third-party subtrees
+                );
+            }
+        }
         false
-    }
+    })
 }
 
 /// Returns `true` if the path's last component matches any user-supplied exclude segment.

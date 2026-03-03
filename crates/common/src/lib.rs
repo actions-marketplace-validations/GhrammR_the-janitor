@@ -49,6 +49,11 @@ pub enum Protection {
     GrepShield = 15,
     /// Post-pipeline: symbol is directly referenced by a test node ID.
     TestReference = 16,
+    /// Stage 2: single-underscore lifecycle hook in a dynamic language (Python, JS, TS).
+    ///
+    /// Methods named `_foo` (single leading underscore, not dunder) in Python/JS/TS
+    /// files are frequently invoked by frameworks without any static import chain.
+    LifecycleHook = 17,
 }
 
 impl fmt::Display for Protection {
@@ -71,6 +76,7 @@ impl fmt::Display for Protection {
             Protection::PytestFixture => "pytest-fixture",
             Protection::GrepShield => "grep-shield",
             Protection::TestReference => "test-reference",
+            Protection::LifecycleHook => "lifecycle-hook-dynamic",
         };
         f.write_str(label)
     }

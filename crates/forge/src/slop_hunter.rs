@@ -12,6 +12,11 @@
 //! | Rust     | Vacuous unsafe | `unsafe { ... }` containing no genuinely unsafe operations |
 //! | Go       | Goroutine closure trap | `go func()` in a loop that may capture loop variables |
 //! | YAML     | Wildcard Kubernetes host | `VirtualService`/`Ingress` with `hosts: ["*"]` — exposes all routes publicly |
+//! | Java     | Empty catch block | `catch (E e) {}` — silently swallows exceptions |
+//! | Java     | `System.out.println` | Console debug logging leaking to production |
+//! | C#       | `async void` method | Cannot be awaited; unhandled exceptions crash the process |
+//! | C++      | Raw `new`/`delete` | Manual memory management instead of RAII smart pointers |
+//! | Bash     | Unquoted variable | `$VAR` without quotes — word-splitting and glob-expansion hazard |
 //!
 //! ## Usage
 //! ```ignore
@@ -56,6 +61,22 @@ const RUST_UNSAFE_QUERY: &str = r#"
 ) @unsafe_block
 "#;
 
+/// Java: empty catch blocks + System.out.print* calls.
+/// Loaded from `queries/java.scm` — embedded at compile time.
+const JAVA_SLOP_QUERY: &str = include_str!("../queries/java.scm");
+
+/// C#: `async void` method declarations.
+/// Loaded from `queries/c_sharp.scm` — embedded at compile time.
+const CSHARP_SLOP_QUERY: &str = include_str!("../queries/c_sharp.scm");
+
+/// C++: raw `new` and `delete` expressions.
+/// Loaded from `queries/cpp.scm` — embedded at compile time.
+const CPP_SLOP_QUERY: &str = include_str!("../queries/cpp.scm");
+
+/// Bash: unquoted variable expansions as command arguments.
+/// Loaded from `queries/bash.scm` — embedded at compile time.
+const BASH_SLOP_QUERY: &str = include_str!("../queries/bash.scm");
+
 // Equivalent to queries/kubernetes.scm — documents the targeted structure.
 // Direct AST walking is used instead of this query because tree-sitter
 // predicates cannot correlate sibling pairs (kind: X AND hosts: ["*"]) in a
@@ -85,6 +106,14 @@ struct QueryEngine {
     /// YAML grammar handle; Kubernetes detection uses direct AST walking for
     /// the same reason as Go — cross-sibling predicate matching is unsupported.
     yaml_lang: Language,
+    java_lang: Language,
+    java_query: Query,
+    csharp_lang: Language,
+    csharp_query: Query,
+    cpp_lang: Language,
+    cpp_query: Query,
+    bash_lang: Language,
+    bash_query: Query,
 }
 
 impl QueryEngine {
@@ -100,6 +129,22 @@ impl QueryEngine {
         let go_lang: Language = tree_sitter_go::LANGUAGE.into();
         let yaml_lang: Language = tree_sitter_yaml::LANGUAGE.into();
 
+        let java_lang: Language = tree_sitter_java::LANGUAGE.into();
+        let java_query = Query::new(&java_lang, JAVA_SLOP_QUERY)
+            .map_err(|e| anyhow::anyhow!("slop_hunter: Java query error: {e}"))?;
+
+        let csharp_lang: Language = tree_sitter_c_sharp::LANGUAGE.into();
+        let csharp_query = Query::new(&csharp_lang, CSHARP_SLOP_QUERY)
+            .map_err(|e| anyhow::anyhow!("slop_hunter: C# query error: {e}"))?;
+
+        let cpp_lang: Language = tree_sitter_cpp::LANGUAGE.into();
+        let cpp_query = Query::new(&cpp_lang, CPP_SLOP_QUERY)
+            .map_err(|e| anyhow::anyhow!("slop_hunter: C++ query error: {e}"))?;
+
+        let bash_lang: Language = tree_sitter_bash::LANGUAGE.into();
+        let bash_query = Query::new(&bash_lang, BASH_SLOP_QUERY)
+            .map_err(|e| anyhow::anyhow!("slop_hunter: Bash query error: {e}"))?;
+
         Ok(Self {
             python_lang,
             python_query,
@@ -107,6 +152,14 @@ impl QueryEngine {
             rust_query,
             go_lang,
             yaml_lang,
+            java_lang,
+            java_query,
+            csharp_lang,
+            csharp_query,
+            cpp_lang,
+            cpp_query,
+            bash_lang,
+            bash_query,
         })
     }
 }
@@ -135,6 +188,10 @@ pub fn find_slop(language: &str, source: &[u8]) -> Vec<SlopFinding> {
         "rs" => find_rust_slop(eng, source),
         "go" => find_go_slop(eng, source),
         "yaml" | "yml" => find_yaml_slop(eng, source),
+        "java" => find_java_slop(eng, source),
+        "cs" => find_csharp_slop(eng, source),
+        "cpp" | "cxx" | "cc" | "hpp" => find_cpp_slop(eng, source),
+        "sh" | "bash" => find_bash_slop(eng, source),
         _ => Vec::new(),
     }
 }
@@ -676,6 +733,271 @@ fn find_wildcard_recursive(node: Node<'_>, source: &[u8]) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// Java: empty catch blocks + System.out.print*
+// ---------------------------------------------------------------------------
+
+fn find_java_slop(eng: &QueryEngine, source: &[u8]) -> Vec<SlopFinding> {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&eng.java_lang).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&eng.java_query, tree.root_node(), source);
+    let cap_names = eng.java_query.capture_names();
+
+    let mut findings = Vec::new();
+
+    while let Some(m) = matches.next() {
+        match m.pattern_index {
+            0 => {
+                // Pattern 0: empty_catch — only flag when the block has no statements.
+                let Some(body_cap) = m
+                    .captures
+                    .iter()
+                    .find(|c| cap_names[c.index as usize] == "catch_body")
+                else {
+                    continue;
+                };
+                let Some(outer_cap) = m
+                    .captures
+                    .iter()
+                    .find(|c| cap_names[c.index as usize] == "empty_catch")
+                else {
+                    continue;
+                };
+                // An empty block has no named children (only `{` and `}` tokens).
+                if body_cap.node.named_child_count() == 0 {
+                    findings.push(SlopFinding {
+                        start_byte: outer_cap.node.start_byte(),
+                        end_byte: outer_cap.node.end_byte(),
+                        description: "Empty catch block: exception is silently swallowed — \
+                                      log or rethrow it"
+                            .to_string(),
+                    });
+                }
+            }
+            1 => {
+                // Pattern 1: sysout_call — filter to System.out.print* in Rust.
+                let sys_text = m
+                    .captures
+                    .iter()
+                    .find(|c| cap_names[c.index as usize] == "sys")
+                    .and_then(|c| c.node.utf8_text(source).ok())
+                    .unwrap_or("");
+                let out_text = m
+                    .captures
+                    .iter()
+                    .find(|c| cap_names[c.index as usize] == "out")
+                    .and_then(|c| c.node.utf8_text(source).ok())
+                    .unwrap_or("");
+                let method_text = m
+                    .captures
+                    .iter()
+                    .find(|c| cap_names[c.index as usize] == "method")
+                    .and_then(|c| c.node.utf8_text(source).ok())
+                    .unwrap_or("");
+
+                // Text predicate: System.out.print*
+                if sys_text != "System" || out_text != "out" || !method_text.starts_with("print") {
+                    continue;
+                }
+
+                let Some(call_cap) = m
+                    .captures
+                    .iter()
+                    .find(|c| cap_names[c.index as usize] == "sysout_call")
+                else {
+                    continue;
+                };
+                findings.push(SlopFinding {
+                    start_byte: call_cap.node.start_byte(),
+                    end_byte: call_cap.node.end_byte(),
+                    description: format!(
+                        "System.out.{method_text}: console debug logging in production — \
+                         use a structured logger (SLF4J, Log4j, etc.)"
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// C#: async void methods
+// ---------------------------------------------------------------------------
+
+fn find_csharp_slop(eng: &QueryEngine, source: &[u8]) -> Vec<SlopFinding> {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&eng.csharp_lang).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&eng.csharp_query, tree.root_node(), source);
+    let cap_names = eng.csharp_query.capture_names();
+
+    let mut findings = Vec::new();
+
+    while let Some(m) = matches.next() {
+        let Some(cap) = m
+            .captures
+            .iter()
+            .find(|c| cap_names[c.index as usize] == "async_void_method")
+        else {
+            continue;
+        };
+
+        // Text-level predicate: method text must contain "async " AND " void "
+        // (checks both modifier and return type without relying on grammar field names).
+        let node_text = cap.node.utf8_text(source).unwrap_or("");
+        if !node_text.contains("async ") {
+            continue;
+        }
+        // Detect void return type: " void " between modifier list and method name.
+        // Simple substring check is safe because "void" as a return type always has
+        // surrounding whitespace in C# syntax.
+        if !node_text.contains(" void ") && !node_text.starts_with("void ") {
+            continue;
+        }
+
+        // Extract the method name for a useful error message.
+        let method_name = find_method_name(cap.node, source);
+        findings.push(SlopFinding {
+            start_byte: cap.node.start_byte(),
+            end_byte: cap.node.end_byte(),
+            description: format!(
+                "async void method `{method_name}`: unhandled exceptions crash the process — \
+                 use async Task instead (or async void only for event handlers)"
+            ),
+        });
+    }
+
+    findings
+}
+
+/// Walk a method_declaration node to extract the method name identifier.
+fn find_method_name(node: Node<'_>, source: &[u8]) -> String {
+    // tree-sitter-c-sharp: method_declaration has a `name` field (identifier).
+    if let Some(name_node) = node.child_by_field_name("name") {
+        if let Ok(text) = name_node.utf8_text(source) {
+            return text.to_string();
+        }
+    }
+    // Fallback: walk direct children for the first identifier.
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            if let Ok(text) = child.utf8_text(source) {
+                return text.to_string();
+            }
+        }
+    }
+    "<unknown>".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// C++: raw new / delete
+// ---------------------------------------------------------------------------
+
+fn find_cpp_slop(eng: &QueryEngine, source: &[u8]) -> Vec<SlopFinding> {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&eng.cpp_lang).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&eng.cpp_query, tree.root_node(), source);
+    let cap_names = eng.cpp_query.capture_names();
+
+    let mut findings = Vec::new();
+
+    while let Some(m) = matches.next() {
+        for cap in m.captures.iter() {
+            let description = match cap_names[cap.index as usize] {
+                "raw_new" => {
+                    "Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() \
+                              for exception-safe RAII ownership"
+                }
+                "raw_delete" => {
+                    "Raw `delete`: manual memory management is error-prone — \
+                                 let unique_ptr/shared_ptr handle deallocation"
+                }
+                _ => continue,
+            };
+            findings.push(SlopFinding {
+                start_byte: cap.node.start_byte(),
+                end_byte: cap.node.end_byte(),
+                description: description.to_string(),
+            });
+        }
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// Bash: unquoted variable expansions
+// ---------------------------------------------------------------------------
+
+fn find_bash_slop(eng: &QueryEngine, source: &[u8]) -> Vec<SlopFinding> {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&eng.bash_lang).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&eng.bash_query, tree.root_node(), source);
+    let cap_names = eng.bash_query.capture_names();
+
+    let mut findings = Vec::new();
+
+    while let Some(m) = matches.next() {
+        let Some(cap) = m
+            .captures
+            .iter()
+            .find(|c| cap_names[c.index as usize] == "unquoted_var")
+        else {
+            continue;
+        };
+
+        let var_text = cap
+            .node
+            .utf8_text(source)
+            .unwrap_or("$VAR")
+            .trim_start_matches('$')
+            .trim_start_matches('{')
+            .trim_end_matches('}');
+
+        findings.push(SlopFinding {
+            start_byte: cap.node.start_byte(),
+            end_byte: cap.node.end_byte(),
+            description: format!(
+                "Unquoted variable `${var_text}`: subject to word splitting and glob expansion — \
+                 quote it: \"${var_text}\""
+            ),
+        });
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -767,6 +1089,184 @@ spec:
         assert!(
             findings.is_empty(),
             "VirtualService with explicit host must not be flagged"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Java tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_java_empty_catch_detected() {
+        let src = b"\
+class Foo {
+    void bar() {
+        try {
+            riskyOp();
+        } catch (Exception e) {}
+    }
+}
+";
+        let findings = find_slop("java", src);
+        assert!(
+            !findings.is_empty(),
+            "empty catch block must be detected: {:?}",
+            findings
+        );
+        assert!(findings[0].description.contains("catch"));
+    }
+
+    #[test]
+    fn test_java_non_empty_catch_not_flagged() {
+        let src = b"\
+class Foo {
+    void bar() {
+        try {
+            riskyOp();
+        } catch (Exception e) {
+            logger.error(\"oops\", e);
+        }
+    }
+}
+";
+        let findings = find_slop("java", src);
+        // No empty-catch finding; may still get sysout — filter for catch type.
+        let catch_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.description.contains("catch"))
+            .collect();
+        assert!(
+            catch_findings.is_empty(),
+            "non-empty catch must not be flagged, got: {:?}",
+            catch_findings
+        );
+    }
+
+    #[test]
+    fn test_java_sysout_detected() {
+        let src = b"\
+class Foo {
+    void bar() {
+        System.out.println(\"debug info\");
+    }
+}
+";
+        let findings = find_slop("java", src);
+        assert!(
+            !findings.is_empty(),
+            "System.out.println must be detected: {:?}",
+            findings
+        );
+        assert!(findings[0].description.contains("System.out"));
+    }
+
+    // -----------------------------------------------------------------------
+    // C# tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_csharp_async_void_detected() {
+        let src = b"\
+public class Handler {
+    public async void ProcessMessage(string msg) {
+        await Task.Delay(100);
+    }
+}
+";
+        let findings = find_slop("cs", src);
+        assert!(
+            !findings.is_empty(),
+            "async void method must be detected: {:?}",
+            findings
+        );
+        assert!(findings[0].description.contains("async void"));
+    }
+
+    #[test]
+    fn test_csharp_async_task_not_flagged() {
+        let src = b"\
+public class Handler {
+    public async Task ProcessMessage(string msg) {
+        await Task.Delay(100);
+    }
+}
+";
+        let findings = find_slop("cs", src);
+        assert!(
+            findings.is_empty(),
+            "async Task method must not be flagged: {:?}",
+            findings
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C++ tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cpp_raw_new_detected() {
+        let src = b"\
+#include <string>
+void foo() {
+    std::string* s = new std::string(\"hello\");
+    delete s;
+}
+";
+        let findings = find_slop("cpp", src);
+        let new_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.description.contains("new"))
+            .collect();
+        assert!(
+            !new_findings.is_empty(),
+            "raw new must be detected: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn test_cpp_raw_delete_detected() {
+        let src = b"\
+void foo(int* p) {
+    delete p;
+}
+";
+        let findings = find_slop("cpp", src);
+        let del_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.description.contains("delete"))
+            .collect();
+        assert!(
+            !del_findings.is_empty(),
+            "raw delete must be detected: {:?}",
+            findings
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bash tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bash_unquoted_var_detected() {
+        let src = b"rm -rf $TARGET_DIR\n";
+        let findings = find_slop("sh", src);
+        assert!(
+            !findings.is_empty(),
+            "unquoted $TARGET_DIR must be detected: {:?}",
+            findings
+        );
+        assert!(findings[0].description.contains("TARGET_DIR"));
+    }
+
+    #[test]
+    fn test_bash_quoted_var_not_flagged() {
+        let src = b"rm -rf \"$TARGET_DIR\"\n";
+        let findings = find_slop("sh", src);
+        assert!(
+            findings.is_empty(),
+            "quoted variable must not be flagged: {:?}",
+            findings
         );
     }
 }

@@ -1,31 +1,171 @@
 name: 'The Janitor'
-description: 'Automated Dead Code Detection & Excision for Rust/Python/JS/C++'
-
-inputs:
-  token:
-    description: 'Janitor purge token (required for clean and dedup --apply). Obtain at thejanitor.app.'
-    required: false
-    default: ''
-  path:
-    description: 'Path to the codebase to analyze (relative to workspace root).'
-    required: false
-    default: '.'
-  args:
-    description: >
-      Janitor subcommand and flags. Default runs a free audit.
-      Examples: "scan --verbose", "dedup", "clean --token TOKEN".
-      When using clean or dedup --apply, embed the token in this argument
-      via ${{ secrets.JANITOR_TOKEN }}.
-    required: false
-    default: 'scan'
+description: >
+  Slop detection + dead-code firewall for pull requests.
+  Bounces the PR diff through tree-sitter AST analysis, fuzzy-clone detection,
+  and zombie-dep scanning. Writes a structured report to the Job Summary and
+  fails CI when the slop score reaches 100 or higher.
+author: 'GhrammR'
 
 branding:
   icon: 'trash-2'
   color: 'red'
 
+# ── Inputs ────────────────────────────────────────────────────────────────────
+inputs:
+  repo:
+    description: >
+      Absolute or workspace-relative path to the repository root to analyse.
+      Leave blank to use $GITHUB_WORKSPACE (the default checked-out repo).
+    required: false
+    default: ''
+  token:
+    description: >
+      GitHub token used to fetch the PR diff via `gh pr diff`.
+      Pass ${{ secrets.GITHUB_TOKEN }} — no elevated scopes required.
+    required: false
+    default: ''
+  fail_on_slop:
+    description: >
+      Exit non-zero when the bounce slop score reaches 100 or higher.
+      Set to 'false' to surface findings without blocking the merge.
+    required: false
+    default: 'true'
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+outputs:
+  slop_score:
+    description: 'Numeric slop score for this PR (0 = clean, ≥100 = gate triggered).'
+    value: ${{ steps.bounce.outputs.score }}
+  antipatterns:
+    description: 'Count of AST antipatterns found in this PR.'
+    value: ${{ steps.bounce.outputs.antipatterns }}
+
+# ── Implementation ────────────────────────────────────────────────────────────
 runs:
-  using: 'docker'
-  image: 'Dockerfile'
-  args:
-    - ${{ inputs.args }}
-    - ${{ inputs.path }}
+  using: composite
+  steps:
+
+    # Step 1 — Download the pre-built janitor binary from GitHub Releases.
+    #
+    # When the caller pins to a full semver tag (e.g. @v6.8.0) the action ref
+    # matches the release tag exactly, so we download that exact binary.
+    # Floating tags (@v6) fall back to the GitHub Releases "latest" API so
+    # they always track the newest stable drop without callers having to update
+    # their workflow files.
+    - name: Download janitor binary
+      shell: bash
+      run: |
+        ACTION_REF="${{ github.action_ref }}"
+        if [[ "$ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          DL_URL="https://github.com/GhrammR/the-janitor/releases/download/${ACTION_REF}/janitor"
+        else
+          DL_URL=$(curl -sSf \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/GhrammR/the-janitor/releases/latest" \
+            | jq -r '.assets[] | select(.name == "janitor") | .browser_download_url')
+        fi
+
+        if [[ -z "$DL_URL" || "$DL_URL" == "null" ]]; then
+          echo "::error::Failed to resolve janitor binary for action ref '${ACTION_REF}'."
+          exit 1
+        fi
+
+        echo "Downloading janitor from ${DL_URL} ..."
+        curl -sSfL "$DL_URL" -o /tmp/janitor
+        chmod +x /tmp/janitor
+        /tmp/janitor --version
+
+    # Step 2 — Fetch the PR diff.
+    #
+    # Uses `gh pr diff` which requires no local git history — only
+    # `contents: read` + `pull-requests: read` permissions on GITHUB_TOKEN.
+    # Produces an empty patch if this is not a PR event or no token was given,
+    # which causes bounce to return score=0 (safe no-op).
+    - name: Fetch PR diff
+      shell: bash
+      run: |
+        PR_NUM="${{ github.event.pull_request.number }}"
+        if [[ -n "$PR_NUM" && -n "${{ inputs.token }}" ]]; then
+          gh pr diff "$PR_NUM" \
+            --repo "${{ github.repository }}" \
+            > /tmp/janitor_pr.patch 2>/dev/null \
+            || touch /tmp/janitor_pr.patch
+        else
+          touch /tmp/janitor_pr.patch
+        fi
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+
+    # Step 3 — Run bounce, write Job Summary, enforce fail gate.
+    - name: Run bounce and write step summary
+      id: bounce
+      shell: bash
+      run: |
+        REPO="${{ inputs.repo }}"
+        REPO="${REPO:-${GITHUB_WORKSPACE:-.}}"
+        PR_NUM="${{ github.event.pull_request.number }}"
+        AUTHOR="${{ github.event.pull_request.user.login }}"
+
+        # Build arg array: optional flags only added when non-empty so the
+        # binary never receives bare empty-string arguments.
+        BOUNCE_ARGS=(bounce "$REPO" --patch /tmp/janitor_pr.patch --format json)
+        [[ -n "$PR_NUM" ]] && BOUNCE_ARGS+=(--pr-number "$PR_NUM")
+        [[ -n "$AUTHOR" ]] && BOUNCE_ARGS+=(--author    "$AUTHOR")
+
+        RESULT=$(/tmp/janitor "${BOUNCE_ARGS[@]}" 2>/dev/null || echo '{"slop_score":0}')
+
+        SCORE=$(   echo "$RESULT" | jq -r '.slop_score           // 0')
+        ANTI=$(    echo "$RESULT" | jq -r '.antipatterns_found   // 0')
+        ZOMBIES=$( echo "$RESULT" | jq -r '.zombie_symbols_added // 0')
+        UNLINKED=$(echo "$RESULT" | jq -r '.unlinked_pr          // 0')
+
+        # Propagate to subsequent steps / calling workflow via GITHUB_OUTPUT.
+        echo "score=${SCORE}"       >> "$GITHUB_OUTPUT"
+        echo "antipatterns=${ANTI}" >> "$GITHUB_OUTPUT"
+
+        # ── Job Summary ───────────────────────────────────────────────────────
+        {
+          echo "## The Janitor — PR #${PR_NUM:-?} Slop Report"
+          echo ""
+          echo "| Metric | Value |"
+          echo "|--------|-------|"
+          echo "| **Slop Score** | ${SCORE} |"
+          echo "| Antipatterns | ${ANTI} |"
+          echo "| Zombie Deps Added | ${ZOMBIES} |"
+          if [[ "$UNLINKED" == "1" ]]; then
+            echo "| Linked Issue | ⚠️ None |"
+          else
+            echo "| Linked Issue | ✅ Present |"
+          fi
+          echo ""
+
+          # Antipattern detail list (deduplicated by jq).
+          DETAILS=$(echo "$RESULT" \
+            | jq -r '(.antipattern_details // []) | unique | .[]' 2>/dev/null || true)
+          if [[ -n "$DETAILS" ]]; then
+            echo "### Antipatterns"
+            echo ""
+            while IFS= read -r d; do
+              echo "- \`$d\`"
+            done <<< "$DETAILS"
+            echo ""
+          fi
+
+          # Score verdict using GitHub's alert callout syntax.
+          if [[ "${SCORE}" -ge 100 ]]; then
+            echo "> [!CAUTION]"
+            echo "> **SLOP GATE TRIGGERED** — Score ${SCORE} ≥ 100. Address findings before merge."
+          elif [[ "${SCORE}" -gt 0 ]]; then
+            echo "> [!WARNING]"
+            echo "> Score ${SCORE} — Minor findings detected. Review recommended."
+          else
+            echo "> [!NOTE]"
+            echo "> Score 0 — Clean PR. No slop detected."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # ── Fail gate ─────────────────────────────────────────────────────────
+        if [[ "${{ inputs.fail_on_slop }}" == "true" && "${SCORE}" -ge 100 ]]; then
+          echo "::error title=Slop Gate::Score ${SCORE} ≥ 100 — see Job Summary for details."
+          exit 1
+        fi

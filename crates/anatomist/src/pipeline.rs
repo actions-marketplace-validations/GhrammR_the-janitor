@@ -476,4 +476,22 @@ mod tests {
 
         fs::remove_dir_all(tmp).ok();
     }
+
+    #[test]
+    fn test_single_underscore_hook_protected_in_python() {
+        let tmp = std::env::temp_dir().join("test_pipeline_hook");
+        fs::create_dir_all(&tmp).ok();
+
+        fs::write(
+            tmp.join("entity.py"),
+            b"class MyEntity:\n    def _async_update_attrs(self):\n        pass\n",
+        )
+        .ok();
+
+        let mut host = make_host();
+        let result = run(&tmp, &mut host, false, None, &[]).unwrap();
+        assert!(!result.dead.iter().any(|e| e.name == "_async_update_attrs"));
+
+        fs::remove_dir_all(tmp).ok();
+    }
 }

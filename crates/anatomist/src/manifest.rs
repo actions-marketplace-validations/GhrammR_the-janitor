@@ -32,6 +32,7 @@
 use aho_corasick::AhoCorasick;
 use common::deps::{DependencyEcosystem, DependencyEntry, DependencyRegistry};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -98,7 +99,13 @@ pub fn scan_manifests(project_root: &Path) -> DependencyRegistry {
             PIP_PYPROJECT => parse_pyproject_toml(path, &mut registry),
             SPIN_MANIFEST => parse_spin_toml(path, &mut registry),
             WRANGLER_MANIFEST => parse_wrangler_toml(path, &mut registry),
-            _ => {}
+            _ => {
+                if path.extension() == Some(OsStr::new("sh"))
+                    || path.extension() == Some(OsStr::new("bash"))
+                {
+                    parse_shell_script(path, &mut registry);
+                }
+            }
         }
     }
 
@@ -229,7 +236,11 @@ pub fn find_zombie_deps_in_blobs(blobs: &HashMap<PathBuf, Vec<u8>>) -> Vec<Strin
             PIP_PYPROJECT => parse_pyproject_toml_content(content, &mut registry),
             SPIN_MANIFEST => parse_spin_toml_content(content, &mut registry),
             WRANGLER_MANIFEST => parse_wrangler_toml_content(content, &mut registry),
-            _ => {}
+            _ => {
+                if let Some("sh" | "bash") = path.extension().and_then(|e| e.to_str()) {
+                    parse_shell_script_content(content, &mut registry);
+                }
+            }
         }
     }
 
@@ -311,6 +322,8 @@ fn is_source_ext(ext: &str) -> bool {
             | "c"
             | "h"
             | "hpp"
+            | "sh"
+            | "bash"
     )
 }
 
@@ -358,6 +371,19 @@ fn parse_spin_toml(path: &Path, registry: &mut DependencyRegistry) {
         return;
     };
     parse_spin_toml_content(&content, registry);
+}
+
+/// Parse a shell script (`.sh`, `.bash`) — extracts system tools declared via
+/// package manager install commands (`apt-get install`, `apt install`,
+/// `brew install`).
+///
+/// Declared tools that are never actually invoked anywhere in the project
+/// are flagged as zombie dependencies.
+fn parse_shell_script(path: &Path, registry: &mut DependencyRegistry) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    parse_shell_script_content(&content, registry);
 }
 
 /// Parse `wrangler.toml` — Cloudflare Workers deployment manifest.
@@ -631,6 +657,61 @@ fn parse_wrangler_toml_content(content: &str, registry: &mut DependencyRegistry)
             for section in &["kv_namespaces", "d1_databases", "r2_buckets"] {
                 extract_wrangler_bindings(env_val, section, "binding", registry);
             }
+        }
+    }
+}
+
+/// Parse shell script content — extracts system tool names from install commands.
+///
+/// Recognises:
+/// - `apt-get install [-y] TOOL1 TOOL2 …`
+/// - `apt install [-y] TOOL1 TOOL2 …`
+/// - `brew install TOOL1 TOOL2 …`
+///
+/// Flags (tokens starting with `-`) and the install command itself are skipped.
+/// Each extracted name is registered as [`DependencyEcosystem::Apt`].
+pub(crate) fn parse_shell_script_content(content: &str, registry: &mut DependencyRegistry) {
+    const INSTALL_TRIGGERS: &[&str] = &[
+        "apt-get install",
+        "apt install",
+        "brew install",
+        "yum install",
+        "dnf install",
+    ];
+
+    for line in content.lines() {
+        let line = line.trim();
+        // Skip comment lines.
+        if line.starts_with('#') {
+            continue;
+        }
+        // Find the earliest install-command marker on this line.
+        let rest = INSTALL_TRIGGERS
+            .iter()
+            .filter_map(|trigger| line.find(trigger).map(|pos| &line[pos + trigger.len()..]))
+            .min_by_key(|r| r.as_ptr() as usize);
+
+        let Some(rest) = rest else {
+            continue;
+        };
+
+        for token in rest.split_whitespace() {
+            // Skip flags (-y, --no-install-recommends, etc.) and shell
+            // variable references ($DEBIAN_FRONTEND=noninteractive).
+            if token.starts_with('-') || token.starts_with('$') || token.starts_with('\\') {
+                continue;
+            }
+            // Strip trailing backslash continuations and trailing semicolons.
+            let name = token.trim_end_matches(['\\', ';', '&', '|']);
+            if name.is_empty() || name == "&&" || name == "||" {
+                continue;
+            }
+            registry.insert(DependencyEntry {
+                name: name.to_owned(),
+                version: "*".to_owned(),
+                ecosystem: DependencyEcosystem::Apt,
+                dev: false,
+            });
         }
     }
 }

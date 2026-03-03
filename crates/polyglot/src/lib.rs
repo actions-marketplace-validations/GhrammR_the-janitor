@@ -6,7 +6,7 @@
 //!
 //! ## Supported Languages
 //! Python, Rust, TypeScript, TSX, JavaScript, JSX, C++, C, Java, C#, Go,
-//! GLSL (vertex/fragment shaders), Objective-C/C++, YAML.
+//! GLSL (vertex/fragment shaders), Objective-C/C++, YAML, Bash.
 //!
 //! ## Usage
 //! ```ignore
@@ -36,6 +36,7 @@ static GO: OnceLock<Language> = OnceLock::new();
 static GLSL: OnceLock<Language> = OnceLock::new();
 static OBJC: OnceLock<Language> = OnceLock::new();
 static YAML: OnceLock<Language> = OnceLock::new();
+static BASH: OnceLock<Language> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -77,6 +78,7 @@ impl LazyGrammarRegistry {
             }
             "m" | "mm" => Some(OBJC.get_or_init(|| tree_sitter_objc::LANGUAGE.into())),
             "yaml" | "yml" => Some(YAML.get_or_init(|| tree_sitter_yaml::LANGUAGE.into())),
+            "sh" | "bash" => Some(BASH.get_or_init(|| tree_sitter_bash::LANGUAGE.into())),
             _ => None,
         }
     }
@@ -124,7 +126,7 @@ mod tests {
     fn test_all_supported_extensions() {
         let supported = [
             "py", "rs", "ts", "tsx", "js", "jsx", "cpp", "cxx", "cc", "h", "hpp", "c", "java",
-            "cs", "go", "glsl", "vert", "frag", "m", "mm", "yaml", "yml",
+            "cs", "go", "glsl", "vert", "frag", "m", "mm", "yaml", "yml", "sh", "bash",
         ];
         for ext in supported {
             assert!(

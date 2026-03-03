@@ -28,6 +28,10 @@ pub enum DependencyEcosystem {
     Wasm = 3,
     /// Cloudflare Workers binding (`wrangler.toml`).
     CloudflareBinding = 4,
+    /// System package manager tool declared via `apt-get install` / `brew install`
+    /// in a shell script (`.sh`).  Covers CI/CD pipeline toolchain deps that
+    /// are installed but may never actually be invoked.
+    Apt = 5,
 }
 
 impl std::fmt::Display for DependencyEcosystem {
@@ -38,6 +42,7 @@ impl std::fmt::Display for DependencyEcosystem {
             DependencyEcosystem::Pip => f.write_str("pip"),
             DependencyEcosystem::Wasm => f.write_str("wasm"),
             DependencyEcosystem::CloudflareBinding => f.write_str("cloudflare"),
+            DependencyEcosystem::Apt => f.write_str("apt"),
         }
     }
 }

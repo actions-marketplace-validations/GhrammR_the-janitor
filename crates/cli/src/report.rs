@@ -272,6 +272,46 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
     }
     out.push('\n');
 
+    // ── Antipattern & violation detail expansion ────────────────────────────
+    // The table above shows only the count. This sub-section prints the actual
+    // human-readable descriptions for every PR in the Slop Top list that carries
+    // at least one antipattern or comment violation entry.
+    // Identical strings are grouped with an `(xN)` suffix to reduce noise.
+    let has_findings = data.slop_top_indices.iter().any(|&i| {
+        !data.entries[i].antipatterns.is_empty() || !data.entries[i].comment_violations.is_empty()
+    });
+
+    if has_findings {
+        out.push_str("### Antipattern & Violation Details\n\n");
+        for &i in &data.slop_top_indices {
+            let e = &data.entries[i];
+            if e.antipatterns.is_empty() && e.comment_violations.is_empty() {
+                continue;
+            }
+            let pr = e
+                .pr_number
+                .map(|n| format!("#{}", n))
+                .unwrap_or_else(|| "-".to_owned());
+            let author = e.author.as_deref().unwrap_or("-");
+            out.push_str(&format!("- **PR {}** (`{}`):\n", pr, author));
+            for (desc, count) in group_strings(&e.antipatterns) {
+                if count > 1 {
+                    out.push_str(&format!("  - {} (x{})\n", desc, count));
+                } else {
+                    out.push_str(&format!("  - {}\n", desc));
+                }
+            }
+            for (desc, count) in group_strings(&e.comment_violations) {
+                if count > 1 {
+                    out.push_str(&format!("  - [violation] {} (x{})\n", desc, count));
+                } else {
+                    out.push_str(&format!("  - [violation] {}\n", desc));
+                }
+            }
+        }
+        out.push('\n');
+    }
+
     // ── Section 2: Structural Clones ───────────────────────────────────────
     out.push_str("## Structural Clones — Near-Duplicate PRs\n\n");
     out.push_str(
@@ -714,6 +754,21 @@ pub fn render_global_json(data: &GlobalReportData, gauntlet_root: &str) -> serde
             })
         }).collect::<Vec<_>>(),
     })
+}
+
+/// Groups identical strings, preserving first-occurrence order.
+///
+/// Returns `(text, count)` pairs. Strings that appear only once have count 1.
+fn group_strings(items: &[String]) -> Vec<(&str, usize)> {
+    let mut result: Vec<(&str, usize)> = Vec::new();
+    for s in items {
+        if let Some(entry) = result.iter_mut().find(|(k, _)| *k == s.as_str()) {
+            entry.1 += 1;
+        } else {
+            result.push((s.as_str(), 1));
+        }
+    }
+    result
 }
 
 /// Format byte count as human-readable (KB/MB).
