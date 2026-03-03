@@ -7,19 +7,20 @@
 
 | Repo | Duration | Peak RSS | Dead Symbols | Clone Groups | PRs Bounced | Unlinked PRs | Zombies | Antipatterns | Errors |
 |------|----------|----------|-------------|--------------|-------------|--------------|---------|--------------|--------|
-| `godotengine/godot` | 2m58s | 55MB | 716 | 2 | 98/100 | 69 | 0 | 12 | 0 |
+| `godotengine/godot` | 2m54s | 58MB | 717 | 2 | 98/100 | 70 | 0 | 15 | 0 |
 
 ### godotengine/godot
 
-**Duration**: 2m58s | **Peak RSS**: 55MB | **PRs Bounced**: 98/100 | **Dead Symbols**: 716 | **Clone Groups**: 2
+**Duration**: 2m54s | **Peak RSS**: 58MB | **PRs Bounced**: 98/100 | **Dead Symbols**: 717 | **Clone Groups**: 2
 
 #### Top 3 Toxic PRs
 
+  - **PR #116839** by `bruvzg` — score **120.0**
+    *Antipatterns: Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x2)*
+    *No linked issue*
+  - **PR #116993** by `Calinou` — score **70.0**
+    *No linked issue*
   - **PR #116982** by `Calinou` — score **70.0**
-    *No linked issue*
-  - **PR #116963** by `Repiteo` — score **70.0**
-    *No linked issue*
-  - **PR #116955** by `van800` — score **70.0**
     *No linked issue*
 
 #### Top 3 Clean PRs
@@ -30,15 +31,15 @@
 
 #### Dead Symbol Certainty Audit (Top 5)
 
-  - `_indices_to_primitives` (servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp)
-  - `_get_color_framebuffer_format_for_pipeline` (servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp)
-  - `_get_reflection_probe_color_framebuffer_format_for_pipeline` (servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp)
-  - `_get_depth_framebuffer_format_for_pipeline` (servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp)
-  - `_get_shadow_cubemap_framebuffer_format_for_pipeline` (servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp)
-  _(…and 711 more — verify with `janitor scan godotengine/godot --library`)_
+  - `_EVCSort` (editor/settings/editor_settings.cpp)
+  - `_get_skipped_locales` (editor/settings/editor_settings.cpp)
+  - `_EDITOR_DEF` (editor/settings/editor_settings.cpp)
+  - `_write_to_str` (core/variant/variant_parser.cpp)
+  - `_compute_key` (scene/resources/canvas_item_material.h)
+  _(…and 712 more — verify with `janitor scan godotengine/godot --library`)_
 
 ---
-| `electron/electron` | 1m58s | 30MB | 10 | 2 | 100/100 | 97 | 0 | 36 | 0 |
+| `electron/electron` | 1m58s | 30MB | 10 | 2 | 100/100 | 97 | 0 | 68 | 0 |
 
 ### electron/electron
 
@@ -46,11 +47,14 @@
 
 #### Top 3 Toxic PRs
 
-  - **PR #50028** by `app/trop` — score **70.0**
+  - **PR #50023** by `app/trop` — score **370.0**
+    *Antipatterns: Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x7)*
     *No linked issue*
-  - **PR #50027** by `app/trop` — score **70.0**
+  - **PR #50022** by `app/trop` — score **370.0**
+    *Antipatterns: Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x7)*
     *No linked issue*
-  - **PR #50026** by `app/trop` — score **70.0**
+  - **PR #50021** by `app/trop` — score **370.0**
+    *Antipatterns: Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x7)*
     *No linked issue*
 
 #### Top 3 Clean PRs
@@ -61,9 +65,542 @@
 
   - `_GtkMenu` (shell/browser/ui/gtk/menu_gtk.h)
   - `_GtkWidget` (shell/browser/ui/gtk/menu_gtk.h)
-  - `_DbusmenuMenuitem` (shell/browser/ui/views/global_menu_bar_x11.cc)
-  - `_DbusmenuServer` (shell/browser/ui/views/global_menu_bar_x11.cc)
-  - `_zero_zip_date_time` (script/release/uploaders/upload.py)
+  - `_DbusmenuMenuitem` (shell/browser/ui/views/global_menu_bar_x11.h)
+  - `_DbusmenuServer` (shell/browser/ui/views/global_menu_bar_x11.h)
+  - `_UnityInspector` (shell/browser/linux/unity_service.cc)
   _(…and 5 more — verify with `janitor scan electron/electron --library`)_
+
+---
+| `microsoft/vscode` | 2m20s | 107MB | 2827 | 0 | 99/100 | 75 | 0 | 68 | 0 |
+
+### microsoft/vscode
+
+**Duration**: 2m20s | **Peak RSS**: 107MB | **PRs Bounced**: 99/100 | **Dead Symbols**: 2827 | **Clone Groups**: 0
+
+#### Top 3 Toxic PRs
+
+  - **PR #298852** by `joshspicer` — score **70.0**
+    *No linked issue*
+  - **PR #298844** by `osortega` — score **70.0**
+    *No linked issue*
+  - **PR #298839** by `rzhao271` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #298819 by `kycutler`
+  - PR #298598 by `sanchirico`
+  - PR #298586 by `barruka`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_updateSnippets` (src/vs/workbench/contrib/snippets/browser/tabCompletion.ts)
+  - `_updateReadIndicator` (src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts)
+  - `_updateTitle` (src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts)
+  - `_updateToggleButton` (src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts)
+  - `_updateExplanationText` (src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts)
+  _(…and 2822 more — verify with `janitor scan microsoft/vscode --library`)_
+
+---
+| `DefinitelyTyped/DefinitelyTyped` | 4m40s | 110MB | 13 | 0 | 99/100 | 99 | 0 | 32 | 0 |
+
+### DefinitelyTyped/DefinitelyTyped
+
+**Duration**: 4m40s | **Peak RSS**: 110MB | **PRs Bounced**: 99/100 | **Dead Symbols**: 13 | **Clone Groups**: 0
+
+#### Top 3 Toxic PRs
+
+  - **PR #74619** by `jlgrimes` — score **70.0**
+    *No linked issue*
+  - **PR #74615** by `myabc` — score **70.0**
+    *No linked issue*
+  - **PR #74613** by `myabc` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+_No zero-score PRs in sample._
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_NotificationModule` (types/openfin/_v2/api/notification/notification.d.ts)
+  - `_IndicatorElement` (types/dojo/dojox.charting.d.ts)
+  - `_CalendarDayView` (types/dojo/dojox.widget.d.ts)
+  - `_CalendarMonthYear` (types/dojo/dojox.widget.d.ts)
+  - `_CalendarMonthView` (types/dojo/dojox.widget.d.ts)
+  _(…and 8 more — verify with `janitor scan DefinitelyTyped/DefinitelyTyped --library`)_
+
+---
+| `vercel/next.js` | 2m11s | 51MB | 0 | 0 | 97/100 | 91 | 0 | 42 | 0 |
+
+### vercel/next.js
+
+**Duration**: 2m11s | **Peak RSS**: 51MB | **PRs Bounced**: 97/100 | **Dead Symbols**: 0 | **Clone Groups**: 0
+
+#### Top 3 Toxic PRs
+
+  - **PR #90769** by `sokra` — score **170.0**
+    *Antipatterns: Vacuous unsafe block: contains no raw pointer dereferences, FFI calls, or inline assembly (x3)*
+    *No linked issue*
+  - **PR #90710** by `lukesandberg` — score **150.0**
+    *No linked issue*
+  - **PR #90617** by `lukesandberg` — score **125.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #90700 by `sleitor`
+  - PR #90697 by `umutkeltek`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+_No dead symbols found._
+
+---
+| `ansible/ansible` | 1m33s | 25MB | 894 | 2 | 100/100 | 79 | 15 | 22 | 0 |
+
+### ansible/ansible
+
+**Duration**: 1m33s | **Peak RSS**: 25MB | **PRs Bounced**: 100/100 | **Dead Symbols**: 894 | **Clone Groups**: 2
+
+#### Top 3 Toxic PRs
+
+  - **PR #86600** by `haosenwang1018` — score **750.0**
+    *Zombie deps: 7*
+    *No linked issue*
+  - **PR #86597** by `haosenwang1018` — score **750.0**
+    *Zombie deps: 7*
+    *No linked issue*
+  - **PR #86604** by `nitzmahone` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #86608 by `pkingstonxyz`
+  - PR #86577 by `NIK8H`
+  - PR #86572 by `cuiweixie`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_get_encoded_arguments` (lib/ansible/_internal/_powershell/_script.py)
+  - `RoleMetadata._load_dependencies` (lib/ansible/playbook/role/metadata.py)
+  - `_generate_ansible_managed` (lib/ansible/_internal/_templating/_template_vars.py)
+  - `DnfModule._sanitize_dnf_error_msg_install` (lib/ansible/modules/dnf.py)
+  - `DnfModule._package_dict` (lib/ansible/modules/dnf.py)
+  _(…and 889 more — verify with `janitor scan ansible/ansible --library`)_
+
+---
+| `home-assistant/core` | 3m47s | 101MB | 8311 | 9 | 98/100 | 84 | 37 | 9 | 0 |
+
+### home-assistant/core
+
+**Duration**: 3m47s | **Peak RSS**: 101MB | **PRs Bounced**: 98/100 | **Dead Symbols**: 8311 | **Clone Groups**: 9
+
+#### Top 3 Toxic PRs
+
+  - **PR #164611** by `arievanderwende` — score **670.0**
+    *Zombie deps: 6*
+    *No linked issue*
+  - **PR #164543** by `Claeysson` — score **525.0**
+    *Zombie deps: 1*
+    *No linked issue*
+  - **PR #164544** by `agentgonzo` — score **200.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #164574 by `chli1`
+  - PR #164560 by `jpbede`
+  - PR #164546 by `ldkud50`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `TokenView._async_handle_auth_code` (homeassistant/components/auth/__init__.py)
+  - `TokenView._async_handle_refresh_token` (homeassistant/components/auth/__init__.py)
+  - `_create_auth_code_store` (homeassistant/components/auth/__init__.py)
+  - `_delete_current_token_soon` (homeassistant/components/auth/__init__.py)
+  - `SamsungTVDevice._update_sources` (homeassistant/components/samsungtv/media_player.py)
+  _(…and 8306 more — verify with `janitor scan home-assistant/core --library`)_
+
+---
+| `kubernetes/kubernetes` | 3m15s | 166MB | 73 | 2 | 98/100 | 86 | 0 | 16 | 0 |
+
+### kubernetes/kubernetes
+
+**Duration**: 3m15s | **Peak RSS**: 166MB | **PRs Bounced**: 98/100 | **Dead Symbols**: 73 | **Clone Groups**: 2
+
+#### Top 3 Toxic PRs
+
+  - **PR #137346** by `aramase` — score **370.0**
+    *No linked issue*
+  - **PR #137310** by `KunWuLuan` — score **140.0**
+    *No linked issue*
+  - **PR #137353** by `ArvindParekh` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #137338 by `GunaKKIBM`
+  - PR #137332 by `gavinkflam`
+  - PR #137319 by `AutuSnow`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_PodResourcesLister_List_Handler` (staging/src/k8s.io/kubelet/pkg/apis/podresources/v1alpha1/api_grpc.pb.go)
+  - `_ExternalJWTSigner_Sign_Handler` (staging/src/k8s.io/externaljwt/apis/v1alpha1/api_grpc.pb.go)
+  - `_ExternalJWTSigner_FetchKeys_Handler` (staging/src/k8s.io/externaljwt/apis/v1alpha1/api_grpc.pb.go)
+  - `_ExternalJWTSigner_Metadata_Handler` (staging/src/k8s.io/externaljwt/apis/v1alpha1/api_grpc.pb.go)
+  - `_ExternalJWTSigner_Sign_Handler` (staging/src/k8s.io/externaljwt/apis/v1/api_grpc.pb.go)
+  _(…and 68 more — verify with `janitor scan kubernetes/kubernetes --library`)_
+
+---
+| `moby/moby` | 1m48s | 34MB | 0 | 0 | 100/100 | 95 | 0 | 29 | 0 |
+
+### moby/moby
+
+**Duration**: 1m48s | **Peak RSS**: 34MB | **PRs Bounced**: 100/100 | **Dead Symbols**: 0 | **Clone Groups**: 0
+
+#### Top 3 Toxic PRs
+
+  - **PR #52123** by `renovate-bot` — score **70.0**
+    *No linked issue*
+  - **PR #52120** by `renovate-bot` — score **70.0**
+    *No linked issue*
+  - **PR #52115** by `renovate-bot` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #52121 by `Wang-squirrel`
+  - PR #52093 by `VedantMadane`
+  - PR #52048 by `shiv-tyagi`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+_No dead symbols found._
+
+---
+| `rust-lang/rust` | 4m4s | 235MB | 30 | 2 | 100/100 | 100 | 0 | 54 | 0 |
+
+### rust-lang/rust
+
+**Duration**: 4m4s | **Peak RSS**: 235MB | **PRs Bounced**: 100/100 | **Dead Symbols**: 30 | **Clone Groups**: 2
+
+#### Top 3 Toxic PRs
+
+  - **PR #153239** by `asder8215` — score **1235.0**
+    *Antipatterns: Vacuous unsafe block: contains no raw pointer dereferences, FFI calls, or inline assembly (x8)*
+    *No linked issue*
+  - **PR #153270** by `jhpratt` — score **515.0**
+    *Antipatterns: Vacuous unsafe block: contains no raw pointer dereferences, FFI calls, or inline assembly (x7)*
+    *No linked issue*
+  - **PR #153277** by `jhpratt` — score **505.0**
+    *Antipatterns: Vacuous unsafe block: contains no raw pointer dereferences, FFI calls, or inline assembly (x7)*
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+_No zero-score PRs in sample._
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_assert_hashmap_is_unwind_safe` (library/std/src/collections/hash/map/tests.rs)
+  - `_block_dim_x` (library/stdarch/crates/core_arch/src/nvptx/mod.rs)
+  - `_block_dim_y` (library/stdarch/crates/core_arch/src/nvptx/mod.rs)
+  - `_block_dim_z` (library/stdarch/crates/core_arch/src/nvptx/mod.rs)
+  - `_block_idx_x` (library/stdarch/crates/core_arch/src/nvptx/mod.rs)
+  _(…and 25 more — verify with `janitor scan rust-lang/rust --library`)_
+
+---
+| `tauri-apps/tauri` | 1m20s | 29MB | 1 | 0 | 100/100 | 68 | 0 | 52 | 0 |
+
+### tauri-apps/tauri
+
+**Duration**: 1m20s | **Peak RSS**: 29MB | **PRs Bounced**: 100/100 | **Dead Symbols**: 1 | **Clone Groups**: 0
+
+#### Top 3 Toxic PRs
+
+  - **PR #14911** by `amrbashir` — score **160.0**
+    *Antipatterns: Vacuous unsafe block: contains no raw pointer dereferences, FFI calls, or inline assembly (x3)*
+  - **PR #15015** by `app/dependabot` — score **70.0**
+    *No linked issue*
+  - **PR #15001** by `app/renovate` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #15010 by `david-crabnebula`
+  - PR #14999 by `RainyNight9`
+  - PR #14998 by `RainyNight9`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_as_defined` (crates/tauri-cli/src/interface/rust.rs)
+
+---
+| `spring-projects/spring-boot` | 1m41s | 55MB | 0 | 0 | 99/100 | 89 | 0 | 21 | 0 |
+
+### spring-projects/spring-boot
+
+**Duration**: 1m41s | **Peak RSS**: 55MB | **PRs Bounced**: 99/100 | **Dead Symbols**: 0 | **Clone Groups**: 0
+
+#### Top 3 Toxic PRs
+
+  - **PR #49028** by `MassimoDeiana` — score **325.0**
+    *No linked issue*
+  - **PR #48879** by `jayychoi` — score **295.0**
+    *No linked issue*
+  - **PR #48960** by `jayychoi` — score **205.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #49306 by `giyeon95`
+  - PR #49285 by `mayankvirole`
+  - PR #49191 by `bbbbooo`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+_No dead symbols found._
+
+---
+| `elastic/elasticsearch` | 3m44s | 315MB | 21 | 0 | 96/100 | 92 | 0 | 35 | 0 |
+
+### elastic/elasticsearch
+
+**Duration**: 3m44s | **Peak RSS**: 315MB | **PRs Bounced**: 96/100 | **Dead Symbols**: 21 | **Clone Groups**: 0
+
+#### Top 3 Toxic PRs
+
+  - **PR #143339** by `nik9000` — score **865.0**
+    *No linked issue*
+  - **PR #143322** by `nik9000` — score **500.0**
+    *No linked issue*
+  - **PR #143352** by `nik9000` — score **475.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #143424 by `nik9000`
+  - PR #143375 by `leontyevdv`
+  - PR #143358 by `ywangd`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_getDocId` (server/src/main/java/org/elasticsearch/script/ScoreScript.java)
+  - `_getDocBaseId` (server/src/main/java/org/elasticsearch/script/ScoreScript.java)
+  - `_getShardId` (server/src/main/java/org/elasticsearch/script/ScoreScript.java)
+  - `_getIndex` (server/src/main/java/org/elasticsearch/script/ScoreScript.java)
+  - `_setShard` (server/src/main/java/org/elasticsearch/script/ScoreScript.java)
+  _(…and 16 more — verify with `janitor scan elastic/elasticsearch --library`)_
+
+---
+| `redis/redis` | 1m30s | 23MB | 87 | 2 | 98/100 | 95 | 0 | 15 | 0 |
+
+### redis/redis
+
+**Duration**: 1m30s | **Peak RSS**: 23MB | **PRs Bounced**: 98/100 | **Dead Symbols**: 87 | **Clone Groups**: 2
+
+#### Top 3 Toxic PRs
+
+  - **PR #14826** by `minchopaskal` — score **70.0**
+    *No linked issue*
+  - **PR #14795** by `moticless` — score **70.0**
+    *No linked issue*
+  - **PR #14788** by `alisaifee` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #14809 by `ArtsyCode`
+  - PR #14792 by `doganarif`
+  - PR #14790 by `veeceey`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_anetTcpServer` (src/anet.c)
+  - `_dictReset` (src/dict.c)
+  - `_dictInit` (src/dict.c)
+  - `_dictResize` (src/dict.c)
+  - `_dictExpand` (src/dict.c)
+  _(…and 82 more — verify with `janitor scan redis/redis --library`)_
+
+---
+| `NixOS/nixpkgs` | 1m55s | 29MB | 199 | 2 | 100/100 | 97 | 0 | 42 | 0 |
+
+### NixOS/nixpkgs
+
+**Duration**: 1m55s | **Peak RSS**: 29MB | **PRs Bounced**: 100/100 | **Dead Symbols**: 199 | **Clone Groups**: 2
+
+#### Top 3 Toxic PRs
+
+  - **PR #496067** by `r-ryantm` — score **70.0**
+    *No linked issue*
+  - **PR #496064** by `r-ryantm` — score **70.0**
+    *No linked issue*
+  - **PR #496062** by `r-ryantm` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #495995 by `LunNova`
+  - PR #495963 by `PatrickDaG`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_map_worker_init` (pkgs/by-name/ni/nixos-render-docs/src/nixos_render_docs/parallel.py)
+  - `_map_worker_step` (pkgs/by-name/ni/nixos-render-docs/src/nixos_render_docs/parallel.py)
+  - `Machine._next_newline_closed_block_from_shell` (nixos/lib/test-driver/src/test_driver/machine/__init__.py)
+  - `Machine._managed_screenshot` (nixos/lib/test-driver/src/test_driver/machine/__init__.py)
+  - `_get_data_json` (pkgs/by-name/gi/gitlab/update.py)
+  _(…and 194 more — verify with `janitor scan NixOS/nixpkgs --library`)_
+
+---
+| `dotnet/aspnetcore` | 2m9s | 142MB | 4 | 0 | 98/100 | 83 | 0 | 42 | 1 |
+
+### dotnet/aspnetcore
+
+**Duration**: 2m9s | **Peak RSS**: 142MB | **PRs Bounced**: 98/100 | **Dead Symbols**: 4 | **Clone Groups**: 0
+
+#### Top 3 Toxic PRs
+
+  - **PR #65622** by `app/dotnet-maestro` — score **70.0**
+    *No linked issue*
+  - **PR #65621** by `app/dotnet-maestro` — score **70.0**
+    *No linked issue*
+  - **PR #65615** by `app/dotnet-maestro` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #65614 by `KristofferStrube`
+  - PR #65611 by `martincostello`
+  - PR #65606 by `app/copilot-swe-agent`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_RW_LOCK` (src/Servers/IIS/AspNetCoreModuleV2/IISLib/rwlock.h)
+  - `_TRACE_LOG` (src/Servers/IIS/AspNetCoreModuleV2/IISLib/tracelog.h)
+  - `_REF_TRACE_LOG_ENTRY` (src/Servers/IIS/AspNetCoreModuleV2/IISLib/reftrace.h)
+  - `_ackTimer` (src/SignalR/clients/ts/signalr/src/MessageBuffer.ts)
+
+---
+| `apache/kafka` | 1m51s | 72MB | 1 | 3 | 100/100 | 100 | 0 | 27 | 0 |
+
+### apache/kafka
+
+**Duration**: 1m51s | **Peak RSS**: 72MB | **PRs Bounced**: 100/100 | **Dead Symbols**: 1 | **Clone Groups**: 3
+
+#### Top 3 Toxic PRs
+
+  - **PR #21581** by `frankvicky` — score **1015.0**
+    *No linked issue*
+  - **PR #21600** by `bbejeck` — score **905.0**
+    *No linked issue*
+  - **PR #21580** by `aliehsaeedii` — score **800.0**
+    *Antipatterns: System.out.println: console debug logging in production — use a structured logger (SLF4J, Log4j, etc.)*
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+_No zero-score PRs in sample._
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_prefix` (release/runtime.py)
+
+---
+| `ohmyzsh/ohmyzsh` | 1m20s | 10MB | 0 | 0 | 100/100 | 92 | 0 | 42 | 0 |
+
+### ohmyzsh/ohmyzsh
+
+**Duration**: 1m20s | **Peak RSS**: 10MB | **PRs Bounced**: 100/100 | **Dead Symbols**: 0 | **Clone Groups**: 0
+
+#### Top 3 Toxic PRs
+
+  - **PR #13604** by `gorewilliams` — score **70.0**
+    *No linked issue*
+  - **PR #13598** by `omair-inam` — score **70.0**
+    *No linked issue*
+  - **PR #13597** by `KevinWMatthews` — score **70.0**
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #13603 by `Nicknames96`
+  - PR #13585 by `danielalanbates`
+  - PR #13579 by `aviu16`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+_No dead symbols found._
+
+---
+| `pytorch/pytorch` | 3m45s | 164MB | 8247 | 24 | 99/100 | 89 | 55 | 4 | 0 |
+
+### pytorch/pytorch
+
+**Duration**: 3m45s | **Peak RSS**: 164MB | **PRs Bounced**: 99/100 | **Dead Symbols**: 8247 | **Clone Groups**: 24
+
+#### Top 3 Toxic PRs
+
+  - **PR #176190** by `soulitzer` — score **450.0**
+    *Zombie deps: 3*
+    *No linked issue*
+  - **PR #176235** by `aorenste` — score **440.0**
+    *Zombie deps: 3*
+    *No linked issue*
+  - **PR #176140** by `weifengpy` — score **420.0**
+    *Zombie deps: 9*
+    *No linked issue*
+
+#### Top 3 Clean PRs
+
+  - PR #176243 by `drisspg`
+  - PR #176226 by `cleonard530`
+  - PR #176135 by `cluePrints`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `_not_implemented` (torch/package/_mock.py)
+  - `_is_aligned` (torch/_inductor/utils.py)
+  - `_set_env` (torch/_inductor/utils.py)
+  - `DeferredLineBase._new_line` (torch/_inductor/utils.py)
+  - `DelayReplaceLine._new_line` (torch/_inductor/utils.py)
+  _(…and 8242 more — verify with `janitor scan pytorch/pytorch --library`)_
+
+---
+| `langchain-ai/langchain` | 1m37s | 20MB | 1483 | 2 | 100/100 | 53 | 77 | 17 | 0 |
+
+### langchain-ai/langchain
+
+**Duration**: 1m37s | **Peak RSS**: 20MB | **PRs Bounced**: 100/100 | **Dead Symbols**: 1483 | **Clone Groups**: 2
+
+#### Top 3 Toxic PRs
+
+  - **PR #35416** by `sadilet` — score **1095.0**
+    *Antipatterns: Hallucinated import: 'otel_context' imported inside function but never used*
+    *Zombie deps: 39*
+    *No linked issue*
+  - **PR #35434** by `marklubin` — score **935.0**
+    *Zombie deps: 17*
+    *No linked issue*
+  - **PR #35459** by `saadsaleem01` — score **465.0**
+    *Zombie deps: 6*
+
+#### Top 3 Clean PRs
+
+  - PR #35523 by `OiPunk`
+  - PR #35520 by `squallopen`
+  - PR #35517 by `A404coder`
+
+#### Dead Symbol Certainty Audit (Top 5)
+
+  - `ModelRetryMiddleware._handle_failure` (libs/langchain_v1/langchain/agents/middleware/model_retry.py)
+  - `_warn_on_import` (libs/langchain/langchain_classic/__init__.py)
+  - `_merge_status` (libs/core/langchain_core/messages/tool.py)
+  - `_get_builtin_translator` (libs/langchain/langchain_classic/retrievers/self_query/base.py)
+  - `SelfQueryRetriever._prepare_query` (libs/langchain/langchain_classic/retrievers/self_query/base.py)
+  _(…and 1478 more — verify with `janitor scan langchain-ai/langchain --library`)_
 
 ---

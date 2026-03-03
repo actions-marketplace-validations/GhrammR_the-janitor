@@ -25,8 +25,11 @@ nav:
   - Safety Guarantees: safety.md
   - Benchmarks: benchmarks.md
   - Pricing: pricing.md
+  - Detection Engine:
+    - Slop Hunter: slop-hunter.md
   - Case Studies:
     - Godot Engine: case-studies/godot.md
+    - Global Audit 2026: case-studies/global-audit-2026.md
   - Governance:
     - Licensing (BUSL-1.1): licensing.md
     - Token Gate: sovereignty/tokens.md
