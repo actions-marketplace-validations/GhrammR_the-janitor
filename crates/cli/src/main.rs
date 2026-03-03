@@ -585,8 +585,9 @@ fn cmd_scan(
             .to_hex()
             .to_string();
 
+        let scan_policy = common::policy::JanitorPolicy::load(project_root);
         let json_out = serde_json::json!({
-            "schema_version": "6.5.0",
+            "schema_version": "6.9.0",
             "slop_score": slop_score,
             "dead_symbols": result.dead.iter().map(|e| serde_json::json!({
                 "id": e.qualified_name,
@@ -596,6 +597,14 @@ fn cmd_scan(
                 "byte_range": [e.start_byte, e.end_byte],
             })).collect::<Vec<_>>(),
             "merkle_root": merkle_root,
+            "policy": {
+                "min_slop_score": scan_policy.min_slop_score,
+                "require_issue_link": scan_policy.require_issue_link,
+                "allowed_zombies": scan_policy.allowed_zombies,
+                "pqc_enforced": scan_policy.pqc_enforced,
+                "custom_antipatterns": scan_policy.custom_antipatterns,
+                "refactor_bonus": scan_policy.refactor_bonus,
+            },
         });
         println!("{}", serde_json::to_string_pretty(&json_out)?);
     } else {
@@ -1981,9 +1990,13 @@ fn cmd_bounce(
     author: Option<&str>,
     pr_body: Option<&str>,
 ) -> anyhow::Result<()> {
+    use common::policy::JanitorPolicy;
     use common::registry::{MappedRegistry, SymbolRegistry};
     use forge::slop_filter::{bounce_git, PRBouncer, PatchBouncer};
     use std::io::Read as _;
+
+    // Load governance manifest — fallback to defaults if absent or malformed.
+    let policy = JanitorPolicy::load(project_root);
 
     // Load symbol registry — empty registry is safe (bounce degrades to clone-only analysis).
     let rkyv_path = registry_override
@@ -2105,6 +2118,18 @@ fn cmd_bounce(
         }
     }
 
+    // Apply governance policy transformations.
+    if policy.allowed_zombies {
+        score.zombie_symbols_added = 0;
+    }
+    // require_issue_link: if the policy mandates a linked issue and no PR body
+    // was supplied (git-native mode without --pr-body), treat the PR as unlinked.
+    if policy.require_issue_link && score.unlinked_pr == 0 && pr_body.is_none() {
+        score.unlinked_pr = 1;
+    }
+    let effective_gate = policy.effective_gate(pr_body);
+    let gate_passed = policy.gate_passes(score.score(), pr_body);
+
     if format == "json" {
         let json_out = serde_json::json!({
             "schema_version": "6.9.0",
@@ -2119,6 +2144,8 @@ fn cmd_bounce(
             "unlinked_pr": score.unlinked_pr,
             "hallucinated_security_fix": score.hallucinated_security_fix,
             "merkle_root": merkle_root,
+            "gate_passed": gate_passed,
+            "effective_gate": effective_gate,
         });
         println!(
             "{}",
@@ -2142,11 +2169,12 @@ fn cmd_bounce(
         );
         println!("+------------------------------------------+");
         println!("  Merkle root: {}...", &merkle_root[..32]);
+        println!("  Gate threshold: {} (effective: {})", policy.min_slop_score, effective_gate);
         println!();
-        if score.is_clean() {
-            println!("PATCH CLEAN — no slop detected.");
+        if gate_passed {
+            println!("PATCH CLEAN — slop score {} < gate {}.", score.score(), effective_gate);
         } else {
-            println!("PATCH FLAGGED — slop score: {}", score.score());
+            println!("PATCH FLAGGED — slop score {} ≥ gate {}.", score.score(), effective_gate);
         }
     }
 
