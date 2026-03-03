@@ -120,19 +120,97 @@ The `sha256_pre_cleanup` field captures the SHA-256 hash of the entire file *bef
 
 ---
 
+## The Shadow Merger
+
+Before the slop pipeline evaluates a PR, The Janitor must synthesise what the merged
+codebase will look like. Naively cloning the repository and applying patches risks
+executing malicious build scripts, triggering CMake, or running Makefile targets embedded
+in the PR itself.
+
+**The Shadow Merger eliminates this attack surface entirely.**
+
+### How It Works
+
+`shadow_git.rs` exposes a single entry point:
+
+```rust
+pub fn simulate_merge(
+    repo: &Repository,
+    base_oid: Oid,
+    head_oid: Oid,
+) -> Result<MergeSnapshot, MergeError>
+```
+
+Internally, `simulate_merge` uses libgit2's tree-diff API to compute the set of changed
+blobs between `base_oid` and `head_oid`. Every operation is in-memory:
+
+| Step | What Happens | Disk I/O |
+|:-----|:------------|:--------:|
+| Open existing repo | Read `.git/objects/` (already on disk) | Read-only |
+| Resolve OIDs | Deref commits → trees in object store | Read-only |
+| Tree diff | Compute changed path → blob mappings | None |
+| Blob load | Decompress blob data into heap | None |
+| Return `MergeSnapshot` | `HashMap<PathBuf, Vec<u8>>` in RAM | **None** |
+
+**No file is checked out. No working directory is modified. No build tool is invoked.**
+
+The `MergeSnapshot` is a pure in-memory map from file path to file content. The slop
+pipeline receives this map and parses each blob directly from the heap buffer — tree-sitter
+operates on `&[u8]`, not on file paths.
+
+### Why This Matters
+
+A compromised PR could include:
+
+- `CMakeLists.txt` that runs a `add_custom_command(POST_BUILD ...)` shell payload
+- `Makefile` targets executed by `make` during a build-triggered scan
+- `setup.py` / `pyproject.toml` with `setup_requires` that pip-installs malware
+- `.github/actions/` that a naive tool might evaluate locally
+
+The Shadow Merger never materialises any of these to disk. The malicious content exists
+only as a byte array in heap memory — unexecutable, unreachable by the OS process loader.
+
+### Security Boundary
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  janitor bounce                      │
+│                                                      │
+│  simulate_merge() ──► MergeSnapshot (heap)          │
+│       │                     │                        │
+│  libgit2 read-only     find_slop() ◄── tree-sitter  │
+│  object store access   (parses &[u8], never executes)│
+│                                                      │
+│  ══════════════════════════════════════════════════  │
+│  ISOLATION BOUNDARY: zero shell execution below      │
+└─────────────────────────────────────────────────────┘
+```
+
+No shell is spawned. No temporary files are created. The process never drops privileges —
+it never needs elevated access to begin with.
+
+---
+
 ## Cryptographic Key Rotation & Token Revocation
 
-The signed attestation pipeline (Lead Specialist / Industrial Core) is protected by an **Ed25519 keypair embedded in the binary**. This section explains how token revocation works and how it satisfies change-management requirements.
+The signed attestation pipeline (Lead Specialist / Industrial Core) is protected by an
+**ML-DSA-65 keypair (NIST FIPS 204)** embedded in the binary. ML-DSA-65 is a
+Module Lattice Digital Signature Algorithm standardised by NIST in August 2024 as part
+of the Post-Quantum Cryptography (PQC) standard suite. It provides 128-bit post-quantum
+security and is resistant to attacks from both classical and quantum adversaries.
 
 ### How Tokens Are Verified
 
-A Lead Specialist token is a base64-encoded Ed25519 signature of the string `JANITOR_PURGE_AUTHORIZED`, signed by the private signing key held exclusively by thejanitor.app. The binary contains only the corresponding **verifying key** (32 bytes). Verification is a pure offline computation — no network call, no lookup table, no telemetry.
+A Lead Specialist token is a base64-encoded ML-DSA-65 signature of the string
+`JANITOR_PURGE_AUTHORIZED`, signed by the private signing key held exclusively by
+thejanitor.app. The binary contains only the corresponding **verifying key**. Verification
+is a pure offline computation — no network call, no lookup table, no telemetry.
 
 ### Token Revocation via Keypair Rotation
 
 Because each token is a deterministic function of the keypair, **revocation is achieved by rotating the keypair**:
 
-1. A new Ed25519 keypair is generated (`cargo run -p mint-token -- generate`).
+1. A new ML-DSA-65 keypair is generated (`cargo run -p mint-token -- generate`).
 2. The new verifying key is embedded in a reissued binary (a new patch release).
 3. All existing tokens — signed against the old private key — are **cryptographically invalid** against the new verifying key. No database lookup, no revocation list, no network check is required.
 4. New tokens are issued to valid licensees via the standard token delivery process.
@@ -152,16 +230,23 @@ This model has a clear, auditable change-management trail:
 
 Industrial Core licensees receive a **contractual rotation SLA**: an emergency keypair rotation and new binary delivery within 4 hours of a confirmed compromise report.
 
+### Post-Quantum Rationale
+
+Classical elliptic-curve schemes are broken by Shor's algorithm on a sufficiently capable
+quantum computer. ML-DSA-65 (FIPS 204) is lattice-based and provides no known quantum
+speedup for signature forgery. Migrating now eliminates exposure to "harvest now, decrypt
+later" attacks against signed attestation logs.
+
 ### Forensic Traceability
 
-Every physical excision event signed with a valid token includes a per-event Ed25519 signature in the audit log:
+Every physical excision event signed with a valid token includes a per-event ML-DSA-65 signature in the audit log:
 
 ```json
 {
   "timestamp": "2026-02-19T10:00:00Z",
   "file_path": "/abs/path/src/module.py",
   "sha256_pre_cleanup": "a3b4c5d6...",
-  "attestation_signature": "<base64-ed25519-sig>"
+  "attestation_signature": "<base64-mldsa65-sig>"
 }
 ```
 

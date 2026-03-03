@@ -6,6 +6,8 @@ repo_name: GhrammR/the-janitor
 
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
   palette:
     - scheme: slate
       primary: indigo

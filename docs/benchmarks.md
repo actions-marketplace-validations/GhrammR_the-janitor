@@ -1,112 +1,164 @@
-# Benchmarks — 15-Repo Omni-Gauntlet
+# Benchmarks — 20-Repo Ultimate Gauntlet
 
-Results from **v6.7.0**. All repos scanned with `janitor scan` (default mode — no `--library` flag).
-**Hardware**: AMD64 / WSL2, Linux 6.6.87. Single-threaded scan per repo.
+Results from **v6.9.0**. All repos scanned with `janitor scan --library` and 100 PRs
+bounced per repo via `janitor bounce --patch`. Scan excludes: `tests/`, `vendor/`,
+`thirdparty/`, `node_modules/`, `generated/`, `docs/`.
 
----
-
-## Industrial Kill Table
-
-| Repo | Language | Total Symbols | Dead | Dead% | Peak RAM | Scan Time |
-|:-----|:---------|:-------------|:-----|:------|:---------|:----------|
-| doom | C | 759 | 757 | **99.7%** | 17 MB | 1.0 s |
-| FreeCol | Java | 13,711 | 11,904 | **86.8%** | 27 MB | 3.6 s |
-| Mindustry | Java | 10,964 | 8,071 | **73.6%** | 25 MB | 3.2 s |
-| veloren | Rust | 12,130 | 8,856 | **73.0%** | 28 MB | 6.8 s |
-| hugo | Go | 9,737 | 7,058 | **72.5%** | 33 MB | 3.9 s |
-| **godot** | **C++** | **22,747** | **16,195** | **71.2%** | **58 MB** | **33 s** |
-| lodash | JS | 1,870 | 1,190 | **63.6%** | 39 MB | 1.1 s |
-| black | Python | 2,512 | 473 | **18.8%** | 79 MB | 9.8 s |
-| rich | Python | 2,089 | 357 | **17.1%** | 16 MB | 2.0 s |
-| starlette | Python | 1,633 | 148 | **9.1%** | 12 MB | 0.9 s |
-| scrapy | Python | 6,554 | 578 | **8.8%** | 18 MB | 3.4 s |
-| flask | Python | 1,619 | 135 | **8.3%** | 12 MB | 0.6 s |
-| requests | Python | 756 | 81 | **10.7%** | 12 MB | 0.4 s |
-| fastapi | Python | 5,407 | 99 | **1.8%** | 19 MB | 4.8 s |
-| axios | JS/TS | 248 | 11 | **4.4%** | 13 MB | 0.4 s |
-
-**Total corpus**: 92,736 symbols across 15 repos
-**Total dead symbols found**: 55,913 (60.3% average)
-**OOM events**: 0 / 15
-
-> **Note**: Default scan mode (no `--library`) is used here for maximum signal: all unreferenced
-> internal symbols are candidates. Use `--library` when scanning a library you publish as an API —
-> it promotes all `pub` symbols to `Protection::LibraryMode`, dropping the dead rate to near-zero
-> for framework-heavy repos (fastapi, starlette, flask).
+**Hardware**: AMD64 / WSL2, Linux 6.6.87. 8 GB RAM. Single-threaded scan per repo.
 
 ---
 
-## The Godot Record — C++ at Scale
+## 20-Repo Gauntlet Summary
 
-> **22,747 entities. 58 MB peak RSS. 33 seconds. Zero panics.**
+| Repo | Lang | Peak RSS | Dead Symbols | Clone Groups | PRs Bounced | Unlinked | Antipatterns |
+|:-----|:-----|:--------:|-------------:|:------------:|:-----------:|:--------:|:------------:|
+| **godotengine/godot** | C++ | **58 MB** | 717 | 2 | 98/100 | 70 | 15 |
+| electron/electron | C++/JS | 30 MB | 10 | 2 | 100/100 | 97 | 68 |
+| microsoft/vscode | TS | 107 MB | 2,827 | 0 | 99/100 | 75 | 68 |
+| DefinitelyTyped/DefinitelyTyped | TS | 110 MB | 13 | 0 | 99/100 | 99 | 32 |
+| vercel/next.js | JS/TS | 51 MB | 0 | 0 | 97/100 | 91 | 42 |
+| ansible/ansible | Python | 25 MB | 894 | 2 | 100/100 | 79 | 22 |
+| home-assistant/core | Python | 101 MB | 8,311 | 9 | 98/100 | 84 | 9 |
+| kubernetes/kubernetes | Go | 166 MB | 73 | 2 | 98/100 | 86 | 16 |
+| moby/moby | Go | 34 MB | 0 | 0 | 100/100 | 95 | 29 |
+| **rust-lang/rust** | **Rust** | **235 MB** | 30 | 2 | 100/100 | 100 | 54 |
+| tauri-apps/tauri | Rust/JS | 29 MB | 1 | 0 | 100/100 | 68 | 52 |
+| spring-projects/spring-boot | Java | 55 MB | 0 | 0 | 99/100 | 89 | 21 |
+| elastic/elasticsearch | Java | 315 MB | 21 | 0 | 96/100 | 92 | 35 |
+| redis/redis | C | 23 MB | 87 | 2 | 98/100 | 95 | 15 |
+| NixOS/nixpkgs | Nix | 29 MB | 199 | 2 | 100/100 | 97 | 42 |
+| dotnet/aspnetcore | C# | 142 MB | 4 | 0 | 98/100 | 83 | 42 |
+| apache/kafka | Java | 72 MB | 1 | 3 | 100/100 | 100 | 27 |
+| ohmyzsh/ohmyzsh | Bash | 10 MB | 0 | 0 | 100/100 | 92 | 42 |
+| pytorch/pytorch | C++/Py | 164 MB | 8,247 | 24 | 99/100 | 89 | 4 |
+| langchain-ai/langchain | Python | 20 MB | 1,483 | 2 | 100/100 | 53 | 17 |
 
-Godot is the stress anchor. The engine spans 1,200+ files, mixes C++, GLSL, and Objective-C,
-and contains complex template hierarchies, `#include` networks, and shader pipelines.
-The Janitor processes the entire symbol graph in a single streaming pass with constant memory
-per file — peak RSS stabilised at 58 MB, well inside CI runner constraints.
+**Total PRs bounced**: 1,979 / 2,000 across 20 repos
+**Total dead symbols found**: 22,918
+**Total clone groups detected**: 55
+**OOM events**: 0 / 20
+**Errors**: 1 (dotnet/aspnetcore, one timeout)
+
+---
+
+## The Anchor Stats
+
+### Godot Engine — C++ at Scale (58 MB)
+
+> **717 dead symbols (library mode). 58 MB peak RSS. 33 seconds static scan. Zero OOM.**
+
+Godot is the polyglot stress anchor: C++, C#, Java, Objective-C, GLSL, Python — 1,200+
+source files, complex template hierarchies, `#include` networks, and shader pipelines.
+
+The Janitor processes the full symbol graph in a single streaming pass:
 
 - 0 panics on `.glsl` and `.mm` (Objective-C) files
 - 0 false positives on engine lifecycle callbacks (`_ready`, `_process`, `_physics_process`)
-- 71.2% dead in default mode: internal helpers with no upward references
-- In `--library` mode (all `pub` symbols protected), the dead rate drops to structural cruft only
+- 58 MB peak RSS: well inside any CI runner's memory budget
+- **15 antipatterns** caught across 98 bounced PRs — raw `new` usage flagged in C++ PRs
 
-The Godot result confirms **O(1) memory stability** for polyglot C++ codebases at production scale.
+```
+Peak RSS   : 58 MB
+Static scan: 33 seconds
+PRs bounced: 98 / 100
+Antipatterns caught: 15
+Clone groups: 2
+```
+
+### rust-lang/rust — 235 MB Ceiling Test
+
+> **235 MB peak RSS. 4m4s. 100/100 PRs bounced. 54 vacuous-`unsafe` antipatterns.**
+
+The Rust compiler repo is the RAM stress test: 30+ crates, stdarch, library/, compiler/,
+and the entire standard library. Peak RSS stabilised at 235 MB — the highest in the corpus.
+**Zero OOM.** The Physarum backpressure governor (`SystemHeart::beat()`) prevented runaway
+allocation throughout the full 4-minute session.
+
+The slop signal was loud: 54 antipatterns across 100 PRs, all vacuous `unsafe` blocks
+containing no raw pointer dereferences, FFI calls, or inline assembly. The worst offender:
+
+| PR | Author | Score | Finding |
+|----|--------|------:|:--------|
+| #153239 | `asder8215` | **1,235** | 8× vacuous `unsafe` block |
+| #153270 | `jhpratt` | 515 | 7× vacuous `unsafe` block |
+| #153277 | `jhpratt` | 505 | 7× vacuous `unsafe` block |
 
 ---
 
-## PR Veto: The Godot Logic-Clone Intercept
+## PR Bounce Highlights
 
-The `janitor bounce` command operates as a GitHub Checks gate before merge. The following
-artifact was produced by intercepting a mock PR to Godot that added a structural clone of
-`Vector3::dot` under a different name and variable set:
+### Kafka — Java Slop Detected
 
-**Veto Report** (`janitor bounce . --patch slop_pr.patch --format json`):
+`apache/kafka` produced the highest-quality Java slop signal in the corpus. PR #21580 by
+`aliehsaeedii` was caught adding `System.out.println` debug logging in production Java:
 
-```json
-{
-  "schema_version": "6.5.0",
-  "dead_symbols_added": 0,
-  "logic_clones_found": 1,
-  "zombie_symbols_added": 0,
-  "antipatterns_found": 0,
-  "merkle_root": "265b80e3666342e7d48329cafbe6b866937669a0e7a0b17eaab1ce2001a8cd33",
-  "slop_score": 5
-}
+```
+Score: 800 | Antipattern: System.out.println: console debug logging in production
+           | — use a structured logger (SLF4J, Log4j, etc.)
 ```
 
-The patch introduced `vec3_dot_physics` — identically structured to `vec3_dot` after
-alpha-normalization. Score 5 = 1 logic clone × 5. **PR blocked.**
+100% of Kafka PRs were unlinked to issues — zero PRs in the sample referenced a ticket.
+
+### LangChain — Highest Zombie Dep Density
+
+`langchain-ai/langchain` had the most aggressive zombie dependency signal. PR #35416 by
+`sadilet` introduced a hallucinated import (`otel_context` imported inside a function, never
+used) and 39 zombie dependencies in a single patch:
+
+```
+Score: 1,095 | Antipattern: Hallucinated import: 'otel_context' imported inside function
+             | but never used
+             | Zombie deps: 39
+```
+
+### PyTorch — Clone Epidemic
+
+`pytorch/pytorch` registered **24 clone groups** — the highest dedup signal in the corpus.
+55 zombie deps were introduced across the 99 bounced PRs.
 
 ---
 
 ## Methodology
 
+> Measured via `time -v` on 8 GB Dell Inspiron (2019). Zero-Copy `rkyv` architecture.
+
 ```bash
-# Gauntlet runner (tools/run_gauntlet.sh)
-for repo in $GAUNTLET_DIR/*/; do
-  /usr/bin/time -v janitor scan "$repo" 2>time.log >scan.log
-  # parse Total/Dead from scan.log, RSS/Elapsed from time.log
+# Ultimate Gauntlet runner (tools/ultimate_gauntlet.sh)
+for REPO in "${REPOS[@]}"; do
+  git clone --depth 1 "https://github.com/${REPO}" /tmp/gauntlet_repo
+  /usr/bin/time -v janitor scan /tmp/gauntlet_repo \
+      --library --format json > scan.json 2> time.log
+  # Peak RSS from "Maximum resident set size (kbytes)" in GNU time -v output
+  janitor dedup /tmp/gauntlet_repo
+  # Bounce last 100 PRs via gh pr diff (no local git history required)
+  for PR in $(gh pr list --repo "$REPO" --limit 100 --json number -q '.[].number'); do
+    gh pr diff "$PR" --repo "$REPO" > pr.patch
+    janitor bounce /tmp/gauntlet_repo --patch pr.patch --format json
+  done
+  rm -rf /tmp/gauntlet_repo   # Immediate teardown for disk budget
 done
 ```
 
-All scans run cold (no `.janitor/symbols.rkyv` cache from a prior run). Peak RSS from
-`Maximum resident set size (kbytes)` in GNU `time -v` output. Scan time from
-`Elapsed (wall clock) time`.
+All scans run cold (no `.janitor/symbols.rkyv` cache). Peak RSS from
+`Maximum resident set size (kbytes)` in GNU `time -v` output.
+The `--library` flag promotes all `pub` symbols to `Protection::LibraryMode`,
+making dead-symbol counts reflect genuine unreferenced internal helpers only.
 
 ---
 
 ## Language Support Matrix
 
-| Language | Grammar | Status | Repr. Repo |
-|:---------|:--------|:-------|:-----------|
-| Python | `tree-sitter-python` | Production | scrapy, flask, black |
-| Rust | `tree-sitter-rust` | Production | veloren |
-| JavaScript | `tree-sitter-javascript` | Production | lodash, axios |
-| TypeScript | `tree-sitter-typescript` | Production | axios |
-| C++ | `tree-sitter-cpp` | Production | godot |
-| C | `tree-sitter-c` | Production | doom |
-| Java | `tree-sitter-java` | Production | Mindustry, FreeCol |
-| C# | `tree-sitter-c-sharp` | Production | — |
-| Go | `tree-sitter-go` | Production | hugo |
+| Language | Grammar | Status | Gauntlet Repo |
+|:---------|:--------|:-------|:--------------|
+| Python | `tree-sitter-python` | Production | ansible, home-assistant, pytorch, langchain |
+| Rust | `tree-sitter-rust` | Production | rust-lang/rust, tauri |
+| JavaScript | `tree-sitter-javascript` | Production | electron, next.js |
+| TypeScript | `tree-sitter-typescript` | Production | vscode, DefinitelyTyped |
+| C++ | `tree-sitter-cpp` | Production | godot, electron, pytorch |
+| C | `tree-sitter-c` | Production | redis |
+| Java | `tree-sitter-java` | Production | kafka, elasticsearch, spring-boot |
+| C# | `tree-sitter-c-sharp` | Production | dotnet/aspnetcore |
+| Go | `tree-sitter-go` | Production | kubernetes, moby |
+| Bash | `tree-sitter-bash` | Production | ohmyzsh/ohmyzsh |
 | GLSL / VERT / FRAG | `tree-sitter-glsl` | Production | godot shaders |
 | Objective-C / Obj-C++ | `tree-sitter-objc` | Production | godot platform |

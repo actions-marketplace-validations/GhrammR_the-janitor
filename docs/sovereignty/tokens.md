@@ -1,4 +1,4 @@
-# Token Gate: Ed25519 Purge Authorization
+# Token Gate: ML-DSA-65 Purge Authorization
 
 **Crate**: `crates/vault`
 **Guard**: `vault::SigningOracle::verify_token(token: &str) -> bool`
@@ -7,10 +7,10 @@
 
 ## Protocol
 
-Destructive operations (`janitor clean`, `janitor dedup --apply`) require a valid **purge token** — a base64-encoded Ed25519 signature of the string `JANITOR_PURGE_AUTHORIZED`.
+Destructive operations (`janitor clean`, `janitor dedup --apply`) require a valid **purge token** — a base64-encoded ML-DSA-65 (NIST FIPS 204) signature of the string `JANITOR_PURGE_AUTHORIZED`.
 
 ```
-Token = Base64( Ed25519_Sign(SIGNING_KEY, "JANITOR_PURGE_AUTHORIZED") )
+Token = Base64( ML_DSA65_Sign(SIGNING_KEY, "JANITOR_PURGE_AUTHORIZED") )
 ```
 
 The binary embeds only the **verifying key** (32 bytes, `const VERIFYING_KEY_BYTES`). The signing key never leaves thejanitor.app.
@@ -35,7 +35,7 @@ The binary embeds only the **verifying key** (32 bytes, `const VERIFYING_KEY_BYT
                                         Err → ACCESS DENIED
 ```
 
-1. Base64-decode the token → 64-byte Ed25519 signature.
+1. Base64-decode the token → ML-DSA-65 signature bytes.
 2. Construct `Signature::from_bytes(&sig_bytes)`.
 3. Call `verifying_key.verify(b"JANITOR_PURGE_AUTHORIZED", &sig)`.
 4. `Ok(())` → operation proceeds. Any error → process exits 1.
@@ -98,7 +98,7 @@ Tokens are **deterministic** for a given keypair: signing the same message with 
 
 | Property | Guarantee |
 |----------|-----------|
-| **Unforgeability** | Ed25519 — 128-bit security level. Signature invalid without the private key. |
+| **Unforgeability** | ML-DSA-65 (NIST FIPS 204) — 128-bit post-quantum security level. Signature invalid without the private key. |
 | **Message binding** | Token is a signature of the exact string `JANITOR_PURGE_AUTHORIZED`. A token issued for any other message is rejected. |
 | **Key isolation** | Binary embeds only the 32-byte verifying key. Private key is never present on the end-user machine. |
 | **No network call** | Verification is fully offline — `VerifyingKey::verify()` is a pure local computation. |
@@ -118,7 +118,7 @@ This mode is **never acceptable in production**. A binary with `VERIFYING_KEY_BY
 On an invalid or missing token, the CLI prints:
 
 ```
-ACCESS DENIED. Purchase PQC/Ed25519 Token at thejanitor.app
+ACCESS DENIED. Purchase ML-DSA-65 Token at thejanitor.app
 ```
 
 and exits with code `1`. No partial work is performed.

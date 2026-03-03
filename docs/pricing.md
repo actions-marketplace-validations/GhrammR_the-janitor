@@ -38,16 +38,16 @@ Includes all Junior Janitor capabilities, plus:
 
 | Capability | Included |
 |:-----------|:--------:|
-| **PQC-Signed Audit Logs** — every cleanup event automatically signed with Ed25519, stored in `.janitor/audit_log.json` | ✓ |
+| **PQC-Signed Audit Logs** — every cleanup event automatically signed with ML-DSA-65 (NIST FIPS 204), stored in `.janitor/audit_log.json` | ✓ |
 | **CI/CD Compliance Attestation** — `--token` flag activates signed reports in GitHub Actions, GitLab CI, Jenkins | ✓ |
 | **The Governor** — GitHub App that automatically runs `janitor bounce` on every pull request and posts a slop-score comment | ✓ |
 | **Shared Credit Pool** — team-level token shared across all CI runners; no per-seat key management | ✓ |
 | **License Issue SLA** — 48-hour response for license key delivery and renewal | ✓ |
 | Up to 25 named seats on a single license | ✓ |
 
-The token gate is a single Ed25519 signature verified offline — no network call, no telemetry.
+When a pull request clears the gate, The Governor GitHub App issues a CycloneDX v1.5 CBOM automatically — no token flag, no manual step.
 
-[**Get Certified → thejanitor.lemonsqueezy.com**](INSERT_REAL_LEMONSQUEEZY_LINK_HERE)
+[**Activate — Yearly ($499/yr) →**](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7?enabled=1361348) · [**Monthly billing →**](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7?enabled=1362706)
 
 ---
 
@@ -68,38 +68,26 @@ Includes all Team Specialist capabilities, plus:
 
 ---
 
-## What the Token Does
+## How Attestation Works
 
-A Team or Industrial Core token is a **base64-encoded Ed25519 signature** of the string
-`JANITOR_PURGE_AUTHORIZED`. The binary embeds only the verifying key (32 bytes) — no network call
-is made at verification time.
+### Team — The Governor SaaS
 
-When you run:
+When a Team-licensed pull request clears the slop gate, **The Governor** GitHub App automatically issues a **CycloneDX v1.5 CBOM** (Cryptography Bill of Materials). The CBOM records every cryptographic operation: the ML-DSA-65 (NIST FIPS 204) attestation signatures, BLAKE3 structural hashes, and per-symbol audit entries covering `{timestamp}{file_path}{sha256_pre_cleanup}`.
 
-```bash
-janitor clean ./src --force-purge --token <your-token>
-```
+No CLI flag required. No manual step. The Governor handles issuance automatically on a clean merge.
 
-The Janitor:
-1. Verifies the token offline (pure cryptographic check)
-2. Performs the cleanup
-3. Signs each audit entry with a per-event Ed25519 signature covering `{timestamp}{file_path}{sha256_pre_cleanup}`
-4. Writes the signed log to `.janitor/audit_log.json`
-5. Prints: `🛡️ INTEGRITY VERIFIED. PQC-Signed Audit Log generated at .janitor/audit_log.json.`
+### Industrial Core — On-Premises
 
-Without a token:
-1. Performs the cleanup
-2. Writes an unsigned audit log
-3. Prints: `✅ RECLAMATION COMPLETE. (Note: No signed attestation generated. Run with --token to certify this excision.)`
+Industrial Core licensees receive a dedicated verifying-key token for air-gapped deployments. The token is a base64-encoded ML-DSA-65 (NIST FIPS 204) signature of the string `JANITOR_PURGE_AUTHORIZED`, verified offline against the public key embedded in the binary. No network call is made at verification time.
 
-The cleanup is identical either way. The attestation is what you are paying for.
+The cleanup is identical at every tier. The attestation is what you are paying for.
 
 ---
 
 ## FAQ
 
-**Is the token a subscription that can be revoked?**
-Tokens are deterministic for a given keypair — the same key always produces the same token. Revocation works by rotating the keypair (updating `VERIFYING_KEY_BYTES` in the binary and redistributing). Existing tokens for the old key become invalid.
+**Is the Team license a subscription that can be revoked?**
+Team licenses are managed via The Governor SaaS. Industrial Core on-premises tokens are ML-DSA-65 (NIST FIPS 204) signatures — deterministic for a given keypair. Revocation is achieved by rotating the keypair; existing tokens for the old key become cryptographically invalid.
 
 **Does the tool phone home?**
 No. Token verification, audit log signing, and all analysis are fully offline computations. No telemetry is collected.

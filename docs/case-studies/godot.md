@@ -1,9 +1,9 @@
 # Autopsy of a Giant: Auditing the Godot Engine
 
 **Target**: Godot Engine — `master` branch (February 2026)
-**Analyzer**: The Janitor v6.8.0 — default scan mode
-**Scan Date**: 2026-02-26
-**Scan Duration**: **33 seconds**
+**Analyzer**: The Janitor v6.9.0 — library mode + PR bounce
+**Scan Date**: 2026-03-02
+**Scan Duration**: **33 seconds** (static scan) / **2m54s** (full gauntlet: scan + dedup + 98 PRs bounced)
 
 ---
 
@@ -12,16 +12,18 @@
 | Metric | Value |
 |:-------|------:|
 | Lines of code scanned | **~3.5M LOC** |
-| Scan time | **33 seconds** |
+| Scan time (static) | **33 seconds** |
 | Peak RAM | **58 MB** |
 | Total entities extracted | **22,747** |
-| Dead symbols identified | **16,134** |
-| Technical Debt Opportunities (actionable) | **~7,800** |
-| Orphan files | **1,934** |
+| Dead symbols (library mode) | **717** |
+| Clone groups | **2** |
+| PRs bounced | **98 / 100** |
+| Antipatterns caught | **15** |
+| Unlinked PRs | **70 / 98** |
 | OOM events | **0** |
 | Panics | **0** |
 
-**Scanned 3.5M LOC in 33 seconds. Peak Memory: 58 MB. Identified ~7,800 actionable dead symbols.**
+**Scanned 3.5M LOC in 33 seconds. Peak Memory: 58 MB. 15 antipatterns caught across 98 live PRs.**
 
 ---
 
@@ -206,6 +208,47 @@ methods is added to `GLOBAL_SHIELD_NAMES` in `wisdom.rs`:
 
 **Result**: Zero false positives from GDCLASS registration. All lifecycle hooks are
 `Protection::EntryPoint` before the dead-symbol pipeline runs.
+
+---
+
+## The Slop Found
+
+Results from bouncing the **98 most recent Godot PRs** via `gh pr diff` — no local git
+clone required. The Janitor fetches each patch, parses it through tree-sitter, runs the
+full slop pipeline, and writes a `BounceLogEntry` to `.janitor/bounce_log.ndjson`.
+
+### Top 3 Toxic PRs
+
+- **PR #116839** by `bruvzg` — score **120**
+  - *Antipattern: Raw `new`: prefer `std::make_unique<T>()` or `std::make_shared<T>()` for exception-safe RAII ownership (×2)*
+  - *No linked issue*
+
+- **PR #116993** by `Calinou` — score **70**
+  - *No linked issue*
+
+- **PR #116982** by `Calinou` — score **70**
+  - *No linked issue*
+
+### Top 3 Clean PRs
+
+- PR #116976 by `akien-mga` — score 0
+- PR #116954 by `dalexeev` — score 0
+- PR #116946 by `vaner-org` — score 0
+
+### Dead Symbol Certainty Audit (Top 5)
+
+These symbols have zero upward reference paths in library-mode scan:
+
+- `_EVCSort` (`editor/settings/editor_settings.cpp`)
+- `_get_skipped_locales` (`editor/settings/editor_settings.cpp`)
+- `_EDITOR_DEF` (`editor/settings/editor_settings.cpp`)
+- `_write_to_str` (`core/variant/variant_parser.cpp`)
+- `_compute_key` (`scene/resources/canvas_item_material.h`)
+- *(…and 712 more — run `janitor scan godotengine/godot --library` to see the full list)*
+
+**Verdict**: 70 of 98 bounced PRs (71%) had no linked GitHub issue. The top antipattern —
+raw `new` allocation without RAII wrappers — appeared in 15 PRs, concentrated in Godot's
+platform and rendering subsystems where the C++ modernisation has not yet reached.
 
 ---
 

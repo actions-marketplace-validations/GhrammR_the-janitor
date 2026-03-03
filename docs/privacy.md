@@ -50,7 +50,7 @@ All `.janitor/` artefacts remain on your machine under your sole control.
 
 Token verification is a **pure offline cryptographic operation**:
 
-1. Your token is a base64-encoded Ed25519 signature.
+1. Your token is a base64-encoded ML-DSA-65 (NIST FIPS 204) signature.
 2. The binary verifies the signature against a public verifying key embedded in the binary at compile time.
 3. No network request is made. No token value or verification result is transmitted anywhere.
 

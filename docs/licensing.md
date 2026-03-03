@@ -54,10 +54,10 @@ A commercial license is required when **any of the following apply**:
 | Tier | Price | Who It's For |
 |------|-------|--------------|
 | **Free** | **$0** | Individual developers. Unlimited Scan, Cleanup, Dedup, Bounce, Dashboard. No signed logs. |
-| **Team** | **$499/yr** | Teams up to 25. All free features + Ed25519 Integrity Bonds + CI/CD Compliance Attestation + The Governor GitHub App. |
+| **Team** | **$499/yr** | Teams up to 25. All free features + ML-DSA-65 Integrity Bonds + CycloneDX v1.5 CBOMs + CI/CD Compliance Attestation + The Governor GitHub App. |
 | **Industrial** | **Custom** | Monoliths >1M LOC. On-prem token server, keypair rotation protocol, SOC 2 audit support, enterprise SLA, unlimited seats. |
 
-[**Get Certified → thejanitor.lemonsqueezy.com**](https://forgelogic.lemonsqueezy.com/checkout/buy/99915c1e-1c7e-4749-94d8-6de7ed8e33b9)
+[**Get Certified → thejanitor.lemonsqueezy.com**](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7)
 
 ---
 
@@ -66,7 +66,7 @@ A commercial license is required when **any of the following apply**:
 The commercial boundary is enforced cryptographically — not by a license key file or a network check.
 
 1. **Free path**: `janitor scan`, `janitor clean --force-purge` (without `--token`) — no token required.
-2. **Paid path**: operations requiring a purge token call `vault::SigningOracle::verify_token(token)`, which verifies an Ed25519 signature of the string `JANITOR_PURGE_AUTHORIZED` against a verifying key embedded in the binary.
+2. **Paid path**: Industrial Core on-premises tokens call `vault::SigningOracle::verify_token(token)`, which verifies an ML-DSA-65 (NIST FIPS 204) signature of the string `JANITOR_PURGE_AUTHORIZED` against a verifying key embedded in the binary.
 3. **Token issuance**: tokens are minted by thejanitor.app's signing key after license verification. The private key never leaves thejanitor.app servers.
 4. **Offline verification**: the binary performs a pure local cryptographic check — no network call, no telemetry.
 

@@ -13,7 +13,7 @@ The Python implementation relied on ChromaDB semantic search, external LLM API c
 | Python (v4) | Rust (v6.0.0+) |
 |-------------|----------------|
 | NetworkX DiGraph | `petgraph` directed reference graph |
-| Tree-sitter (Python binding) | Tree-sitter (Rust, zero-copy mmap, 9 grammars) |
+| Tree-sitter (Python binding) | Tree-sitter (Rust, zero-copy mmap, 12 grammars) |
 | ChromaDB + UniXcoder | BLAKE3 alpha-normalized structural hashing |
 | LLM merge generation | Deterministic Safe Proxy Pattern |
 | JSON manifests | `rkyv` zero-copy binary registry |
@@ -30,7 +30,7 @@ The Python implementation had three structural flaws that could not be patched:
 
 1. **Non-determinism**: LLM-generated merge bodies varied between runs. Identical inputs produced different outputs. An integrity tool cannot be non-deterministic.
 2. **External dependencies**: ChromaDB and the UniXcoder embedding model required network access and a GPU or paid API. The Janitor must work offline, on a CI runner with no GPU, for airgapped deployments.
-3. **Single-language scope**: A Python-only dead-code tool is a liability in any polyglot codebase. The Rust rewrite supports 9 grammars from day one, with the same pipeline for all languages.
+3. **Single-language scope**: A Python-only dead-code tool is a liability in any polyglot codebase. The Rust rewrite supports 12 grammars from day one, with the same pipeline for all languages.
 
 ---
 

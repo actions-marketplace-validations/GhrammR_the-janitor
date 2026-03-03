@@ -34,7 +34,7 @@ AI generators hallucinate package imports. The Janitor scans `package.json`, `Ca
 
 ### Cryptographic Integrity Bonds
 
-Every cleanup is sealed with an Ed25519 attestation covering `{timestamp}{file_path}{sha256_pre_cleanup}`. The verifying key (32 bytes) is embedded in the binary. Verification is a pure offline computation — a chain of custody for every line of code removed from production.
+When a pull request clears the slop gate, **The Governor** — our GitHub App — automatically issues a **CycloneDX v1.5 CBOM** (Cryptography Bill of Materials) for the merge event. The CBOM records every cryptographic operation performed during the scan: the ML-DSA-65 (NIST FIPS 204) attestation signature, the BLAKE3 structural hashes, and the per-symbol audit entries covering `{timestamp}{file_path}{sha256_pre_cleanup}`. No token flag. No manual step. The proof is issued by the SaaS on a clean merge — a chain of custody for every line of code removed from production.
 
 ---
 
@@ -70,9 +70,6 @@ janitor bounce ./src --patch diff.patch
 
 # Shadow-simulate + remove dead code (free)
 janitor clean ./src --force-purge
-
-# Cleanup with cryptographic chain of custody (Team tier)
-janitor clean ./src --force-purge --token $JANITOR_TOKEN
 ```
 
 ## Language Support
@@ -80,17 +77,17 @@ janitor clean ./src --force-purge --token $JANITOR_TOKEN
 | Language | Dead Functions | Dead Classes | Dead Files | Duplicate Logic |
 |----------|:---:|:---:|:---:|:---:|
 | Python | ✓ | ✓ | ✓ | ✓ |
-| Rust | ✓ | ✓ | ✓ | — |
-| JavaScript / TypeScript | ✓ | ✓ | ✓ | — |
-| C++ | ✓ | ✓ | ✓ | — |
-| Go | ✓ | ✓ | ✓ | — |
-| C# / Java | ✓ | ✓ | ✓ | — |
+| Rust | ✓ | ✓ | ✓ | ✓ |
+| JavaScript / TypeScript | ✓ | ✓ | ✓ | ✓ |
+| C++ | ✓ | ✓ | ✓ | ✓ |
+| Go | ✓ | ✓ | ✓ | ✓ |
+| C# / Java | ✓ | ✓ | ✓ | ✓ |
 
 ## Runtime Architecture
 
 | Subsystem | Technology | Property |
 |-----------|-----------|---------|
-| **AST Engine** | Tree-sitter (9 grammars) | O(n) CST construction; byte-range precision per token |
+| **AST Engine** | Tree-sitter (12 grammars) | O(n) CST construction; byte-range precision per token |
 | **Reference Graph** | Petgraph directed digraph | Topological dead-symbol filter; in-degree = 0 → candidate |
 | **Pattern Matching** | Aho-Corasick (single automaton per group) | O(n+m) multi-pattern scan; zero allocation in hot path |
 | **Registry Persistence** | rkyv + memmap2 | mmap-direct deserialization; no heap allocation for reads |
@@ -99,7 +96,7 @@ janitor clean ./src --force-purge --token $JANITOR_TOKEN
 | **PR Quality Gate** | MinHash LSH (64 hashes, 8-band index) | Lock-free ArcSwap index; sub-linear collision detection |
 | **Deletion Engine** | Bottom-to-top byte-range splice | UTF-8 char-boundary hardened; zero re-parse overhead |
 | **Simulation Layer** | Symlink overlay (Shadow Tree) | Zero additional disk usage; tests run against simulated state |
-| **Audit Attestation** | Ed25519 remote signing | Binary carries only `VERIFYING_KEY_BYTES`; no private key embedded |
+| **Audit Attestation** | ML-DSA-65 (NIST FIPS 204) | CycloneDX v1.5 CBOMs issued by The Governor SaaS on clean merge |
 
 ## Pricing
 
@@ -108,30 +105,23 @@ janitor clean ./src --force-purge --token $JANITOR_TOKEN
 | Tier | Cost | What You Get |
 |:-----|:-----|:-------------|
 | **Free** | $0 | Unlimited scan, clean, dedup, bounce, dashboard, report. No signed logs. |
-| **[Team](INSERT_REAL_LEMONSQUEEZY_LINK_HERE)** | **$499/yr** | All free features + Ed25519 Integrity Bonds + CI/CD Compliance Attestation + The Governor GitHub App. Up to 25 seats. |
-| **[Industrial](INSERT_REAL_LEMONSQUEEZY_LINK_HERE)** | **Custom** | On-Premises Token Server + Keypair Rotation Protocol + SOC 2 Audit Support + Enterprise SLA. Unlimited seats. |
+| **[Team](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7?enabled=1361348)** | **$499/yr** | All free features + ML-DSA-65 Integrity Bonds + CycloneDX v1.5 CBOMs + CI/CD Compliance Attestation + The Governor GitHub App. Up to 25 seats. |
+| **[Industrial](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7)** | **Custom** | On-Premises Token Server + Keypair Rotation Protocol + SOC 2 Audit Support + Enterprise SLA. Unlimited seats. |
 
-[**Activate Attestation → thejanitor.lemonsqueezy.com**](INSERT_REAL_LEMONSQUEEZY_LINK_HERE)
+[**Activate Attestation → thejanitor.lemonsqueezy.com**](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7)
 
 ## CI Integration
 
 ```yaml
-# Structural scan on every PR (free)
-- uses: GhrammR/the-janitor@v6
+# PR slop gate — runs on every pull request (free)
+- id: janitor
+  uses: GhrammR/the-janitor@v6
   with:
-    path: ./src
-    args: scan --format json
+    token: ${{ secrets.GITHUB_TOKEN }}
 
-# PR enforcement gate (free)
-- uses: GhrammR/the-janitor@v6
-  with:
-    args: bounce ./src --patch ${{ github.event.pull_request.diff_url }}
-
-# Signed attestation (Team tier)
-- uses: GhrammR/the-janitor@v6
-  with:
-    args: clean --force-purge --token ${{ secrets.JANITOR_TOKEN }}
-    path: ./src
+# Outputs available downstream:
+# steps.janitor.outputs.slop_score
+# steps.janitor.outputs.antipatterns
 ```
 
 ## Commands
@@ -150,7 +140,7 @@ janitor scan <path> --format json
 janitor dedup <path>
 
 # Shadow-simulate → test → remove dead code
-janitor clean <path> --force-purge [--token <attestation-token>]
+janitor clean <path> --force-purge
 
 # Historical slop / clone / zombie intelligence report
 janitor report [--repo <path>] [--top <n>] [--format markdown|json]
@@ -190,4 +180,4 @@ chmod +x janitor && sudo mv janitor /usr/local/bin/
 
 **Business Source License 1.1 (BUSL-1.1)** — Source Available. Converts to MIT on 2030-02-15.
 
-Scan, cleanup, dedup, bounce, and dashboard are permanently free. Integrity attestation requires a [Team token](INSERT_REAL_LEMONSQUEEZY_LINK_HERE).
+Scan, cleanup, dedup, bounce, and dashboard are permanently free. Integrity attestation is issued by [The Governor](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7) (Team tier).

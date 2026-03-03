@@ -50,9 +50,9 @@ Every PR that introduces a zombie dependency is flagged before merge.
 
 ### Cryptographic Integrity Bonds
 
-Every cleanup operation can be sealed with an **Ed25519 attestation** — a per-event cryptographic signature covering `{timestamp}{file_path}{sha256_pre_cleanup}`. The verifying key (32 bytes) is embedded in the binary. Verification is a pure offline computation.
+When a pull request clears the slop gate, **The Governor** — our GitHub App — automatically issues a **CycloneDX v1.5 CBOM** (Cryptography Bill of Materials) for the merge event. The CBOM records every cryptographic operation performed during the scan: the ML-DSA-65 (NIST FIPS 204) attestation signature, the BLAKE3 structural hashes, and the per-symbol audit entries covering `{timestamp}{file_path}{sha256_pre_cleanup}`.
 
-The result is a `audit_log.json` that can be presented to a SOC 2 auditor, a regulator, or an incident response team as a chain of custody for every line of code removed from production. Not a log. A bond.
+No token flag. No manual step. The proof is issued by the SaaS on a clean merge — a chain of custody presentable to a SOC 2 auditor, a regulator, or an incident response team. Not a log. A bond.
 
 ---
 
@@ -88,7 +88,7 @@ These are real, open, unmerged pull requests against a 3.5M LOC production codeb
 
 ### The Anatomist
 
-Parses via zero-copy Tree-sitter CSTs across **9 grammars: C, C++, Rust, Go, Java, C#, JavaScript, TypeScript, Python**. Extracts every function, class, and top-level symbol as a zero-copy `Entity` with byte ranges, qualified names, decorator lists, and structural hashes. Builds a directed reference graph resolving imports, attribute calls, and language-specific linkage.
+Parses via zero-copy Tree-sitter CSTs across **12 grammars: C, C++, Rust, Go, Java, C#, JavaScript, TypeScript, Python, GLSL, Objective-C, Bash**. Extracts every function, class, and top-level symbol as a zero-copy `Entity` with byte ranges, qualified names, decorator lists, and structural hashes. Builds a directed reference graph resolving imports, attribute calls, and language-specific linkage.
 
 ### The 6-Stage Dead Symbol Pipeline
 
@@ -127,12 +127,12 @@ All operations run locally. Your source code is memory-mapped on your hardware a
 | Tier | Cost | What You Get |
 |:-----|:-----|:-------------|
 | **Free** | $0 | Unlimited scan, clean, dedup, bounce, dashboard, report. No signed logs. |
-| **[Team](INSERT_REAL_LEMONSQUEEZY_LINK_HERE)** | **$499/yr** | All free features + Ed25519 Integrity Bonds + CI/CD Compliance Attestation + The Governor GitHub App. Up to 25 seats. |
-| **[Industrial](INSERT_REAL_LEMONSQUEEZY_LINK_HERE)** | **Custom** | On-Premises Token Server + Keypair Rotation Protocol + SOC 2 Audit Support + Enterprise SLA. Unlimited seats. |
+| **[Team](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7?enabled=1361348)** | **$499/yr** | All free features + ML-DSA-65 Integrity Bonds + CycloneDX v1.5 CBOMs + CI/CD Compliance Attestation + The Governor GitHub App. Up to 25 seats. |
+| **[Industrial](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7)** | **Custom** | On-Premises Token Server + Keypair Rotation Protocol + SOC 2 Audit Support + Enterprise SLA. Unlimited seats. |
 
 The cleanup is identical at every tier. What you are paying for is a cryptographically verifiable chain of custody that satisfies a regulator, an auditor, or an incident response team.
 
-[**Activate Attestation → thejanitor.lemonsqueezy.com**](INSERT_REAL_LEMONSQUEEZY_LINK_HERE)
+[**Activate Attestation → thejanitor.lemonsqueezy.com**](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7)
 
 ---
 
@@ -175,7 +175,7 @@ janitor dedup <path>
 janitor dedup <path> --apply --force-purge
 
 # Shadow-simulate deletion → test suite → physical removal
-janitor clean <path> --force-purge --token <attestation-token>
+janitor clean <path> --force-purge
 
 # Generate historical slop / clone / zombie intelligence report
 janitor report [--repo <path>] [--top <n>] [--format markdown|json]
