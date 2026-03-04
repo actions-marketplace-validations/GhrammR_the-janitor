@@ -89,7 +89,7 @@ if [[ -f "$REGISTRY" ]] && find "$REGISTRY" -mmin +60 -print -quit 2>/dev/null |
 fi
 
 if [[ ! -f "$REGISTRY" ]]; then
-    info "No registry found — running janitor scan (Godot: ~2–5 min)..."
+    info "No registry found — running janitor scan on $REPO_SLUG (~2–5 min)..."
     mkdir -p "$GODOT_REPO/.janitor"
     "$JANITOR" scan "$GODOT_REPO" --library
     if [[ ! -f "$REGISTRY" ]]; then
