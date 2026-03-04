@@ -6,8 +6,8 @@
 # Unknown fields produce a warning and fall back to defaults.
 
 # Composite slop-score threshold above which the PR gate fires.
-# Default: 100. Raise for high-velocity repos; lower for safety-critical code.
-min_slop_score = 100
+# Default: 20. Raise for high-velocity repos; lower for safety-critical code.
+min_slop_score = 20
 
 # When true, any PR without a linked GitHub issue fails the gate unconditionally.
 # Default: false.
@@ -16,8 +16,8 @@ require_issue_link = false
 # When true, zombie-symbol re-introductions (verbatim body match to a previously
 # deleted dead symbol) do not contribute to the score. Enable only during
 # intentional symbol resurrection passes.
-# Default: false.
-allowed_zombies = false
+# Default: true.
+allowed_zombies = true
 
 # Reserved: post-quantum cryptography enforcement (not yet implemented).
 # Default: false.
