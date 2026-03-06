@@ -15,7 +15,7 @@
 //! Output formats: `markdown` (default) and `json`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -89,6 +89,18 @@ pub struct BounceLogEntry {
 // ReportData
 // ---------------------------------------------------------------------------
 
+/// Per-contributor aggregate statistics derived from bounce log entries.
+pub struct UserStats {
+    /// Contributor handle (GitHub login or equivalent).
+    pub author: String,
+    /// Sum of `slop_score` across all PRs attributed to this contributor.
+    pub total_slop_score: u64,
+    /// Total number of PRs audited for this contributor.
+    pub total_pr_count: u32,
+    /// Number of PRs with `slop_score == 0`.
+    pub clean_pr_count: u32,
+}
+
 /// Aggregated report computed from all bounce log entries.
 pub struct ReportData {
     /// All log entries, owned.
@@ -107,6 +119,14 @@ pub struct ReportData {
     /// - `zombie_symbols_added > 0` (Shotgun re-injection)
     /// - an antipattern description containing "Hallucinated" (Hallucination)
     pub total_reclaimed_minutes: f64,
+    /// Top 10 contributors ranked by cumulative slop score descending.
+    pub sloppiest_users: Vec<UserStats>,
+    /// Top 10 contributors ranked by count of zero-score PRs descending.
+    pub cleanest_users: Vec<UserStats>,
+    /// Indices into `entries` sorted by `slop_score` ascending, capped at 50.
+    ///
+    /// Zero-score PRs appear first, providing the "Top 50 Cleanest PRs" list.
+    pub clean_top_indices: Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,12 +200,59 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
     let total_reclaimed_minutes =
         entries.iter().filter(|e| is_actionable(e)).count() as f64 * MINUTES_PER_TRIAGE;
 
+    // ── User stats (Top 10 Sloppiest / Top 10 Cleanest) ───────────────────
+    // Value: (total_slop_score, total_pr_count, clean_pr_count)
+    let mut user_map: HashMap<String, (u64, u32, u32)> = HashMap::new();
+    for entry in &entries {
+        if let Some(author) = entry.author.as_deref() {
+            let e = user_map.entry(author.to_owned()).or_insert((0, 0, 0));
+            e.0 += entry.slop_score as u64;
+            e.1 += 1;
+            if entry.slop_score == 0 {
+                e.2 += 1;
+            }
+        }
+    }
+
+    let mut sloppiest_users: Vec<UserStats> = user_map
+        .iter()
+        .map(|(author, &(total_slop_score, total_pr_count, clean_pr_count))| UserStats {
+            author: author.clone(),
+            total_slop_score,
+            total_pr_count,
+            clean_pr_count,
+        })
+        .collect();
+    sloppiest_users.sort_by(|a, b| b.total_slop_score.cmp(&a.total_slop_score));
+    sloppiest_users.truncate(10);
+
+    let mut cleanest_users: Vec<UserStats> = user_map
+        .iter()
+        .filter(|(_, &(_, _, clean_pr))| clean_pr > 0)
+        .map(|(author, &(total_slop_score, total_pr_count, clean_pr_count))| UserStats {
+            author: author.clone(),
+            total_slop_score,
+            total_pr_count,
+            clean_pr_count,
+        })
+        .collect();
+    cleanest_users.sort_by(|a, b| b.clean_pr_count.cmp(&a.clean_pr_count));
+    cleanest_users.truncate(10);
+
+    // ── Top 50 Cleanest PRs (ascending slop score) ────────────────────────
+    let mut clean_order: Vec<usize> = (0..entries.len()).collect();
+    clean_order.sort_by(|&a, &b| entries[a].slop_score.cmp(&entries[b].slop_score));
+    let clean_top_indices = clean_order.into_iter().take(50).collect::<Vec<_>>();
+
     ReportData {
         entries,
         slop_top_indices,
         clone_pairs,
         zombie_indices,
         total_reclaimed_minutes,
+        sloppiest_users,
+        cleanest_users,
+        clean_top_indices,
     }
 }
 
@@ -309,10 +376,46 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
              Source: [Workslop research](https://builtin.com/articles/what-is-workslop).\n\n",
         );
     }
+
+    // ── Top 10 Sloppiest Contributors ──────────────────────────────────────
+    if !data.sloppiest_users.is_empty() {
+        out.push_str("## Top 10 Sloppiest Contributors\n\n");
+        out.push_str("| Rank | Author | Total Slop Score | PRs Audited | Clean PRs |\n");
+        out.push_str("|------|--------|-----------------|-------------|----------|\n");
+        for (i, u) in data.sloppiest_users.iter().enumerate() {
+            out.push_str(&format!(
+                "| {} | `{}` | **{}** | {} | {} |\n",
+                i + 1,
+                u.author,
+                u.total_slop_score,
+                u.total_pr_count,
+                u.clean_pr_count,
+            ));
+        }
+        out.push('\n');
+    }
+
+    // ── Top 10 Cleanest Contributors ───────────────────────────────────────
+    if !data.cleanest_users.is_empty() {
+        out.push_str("## Top 10 Cleanest Contributors\n\n");
+        out.push_str("| Rank | Author | Clean PRs (Score 0) | PRs Audited |\n");
+        out.push_str("|------|--------|---------------------|-------------|\n");
+        for (i, u) in data.cleanest_users.iter().enumerate() {
+            out.push_str(&format!(
+                "| {} | `{}` | **{}** | {} |\n",
+                i + 1,
+                u.author,
+                u.clean_pr_count,
+                u.total_pr_count,
+            ));
+        }
+        out.push('\n');
+    }
+
     out.push_str("---\n\n");
 
     // ── Section 1: Slop Top ────────────────────────────────────────────────
-    out.push_str("## Slop Top 50 — PRs by Structural Debt Score\n\n");
+    out.push_str("## Top 50 Sloppiest PRs — Ranked by Structural Debt Score\n\n");
 
     if data.slop_top_indices.is_empty() {
         out.push_str(
@@ -349,6 +452,32 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
         }
     }
     out.push('\n');
+
+    // ── Top 50 Cleanest PRs (ascending slop score) ────────────────────────
+    out.push_str("## Top 50 Cleanest PRs — Zero / Low Slop Score\n\n");
+    if data.clean_top_indices.is_empty() {
+        out.push_str("*No bounce data found.*\n\n");
+    } else {
+        out.push_str("| Rank | PR | Author | Slop Score | Timestamp |\n");
+        out.push_str("|------|----|--------|------------|----------|\n");
+        for (rank, &i) in data.clean_top_indices.iter().enumerate() {
+            let e = &data.entries[i];
+            let pr = e
+                .pr_number
+                .map(|n| format!("#{}", n))
+                .unwrap_or_else(|| "-".to_owned());
+            let author = e.author.as_deref().unwrap_or("-");
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                rank + 1,
+                pr,
+                author,
+                e.slop_score,
+                e.timestamp,
+            ));
+        }
+        out.push('\n');
+    }
 
     // ── Antipattern & violation detail expansion ────────────────────────────
     // The table above shows only the count. This sub-section prints the actual

@@ -2349,7 +2349,7 @@ fn locate_report_logo() -> Option<PathBuf> {
 /// - Returns an error if `pandoc` is not in `PATH`.
 /// - Returns an error if pdflatex or required LaTeX packages are missing.
 /// - Returns an error if `pandoc` exits non-zero.
-fn export_pdf(markdown: &str, out: &Path) -> anyhow::Result<()> {
+fn export_pdf(markdown: &str, out: &Path, title: &str) -> anyhow::Result<()> {
     // ── Check pandoc availability ──────────────────────────────────────────
     let pandoc_found = std::process::Command::new("pandoc")
         .arg("--version")
@@ -2392,7 +2392,7 @@ fn export_pdf(markdown: &str, out: &Path) -> anyhow::Result<()> {
         .arg("--toc")
         .arg("--toc-depth=2")
         .arg("-V")
-        .arg("title=The Janitor: Intelligence Report")
+        .arg(format!("title={}", title))
         .arg("-V")
         .arg(format!("date={}", date))
         .arg("-V")
@@ -2477,7 +2477,7 @@ fn cmd_report_global(
         let pdf_path = out
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("janitor_report.pdf"));
-        return export_pdf(&content, &pdf_path);
+        return export_pdf(&content, &pdf_path, "Janitor Global Intelligence Report");
     }
 
     match out {
@@ -2610,7 +2610,8 @@ fn cmd_report(
         let pdf_path = out
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("janitor_report.pdf"));
-        return export_pdf(&content, &pdf_path);
+        let pdf_title = format!("Intelligence Report: The {} Security Team", repo_name);
+        return export_pdf(&content, &pdf_path, &pdf_title);
     }
 
     match out {

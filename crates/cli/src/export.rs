@@ -40,6 +40,10 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
     let mut wtr = csv::Writer::from_path(out)
         .map_err(|e| anyhow::anyhow!("Cannot create CSV file {}: {}", out.display(), e))?;
 
+    // ROI constants — mirror report.rs values.
+    const MINUTES_PER_TRIAGE: f64 = 12.0;
+    const HOURLY_COST_USD: f64 = 100.0;
+
     // Header row.
     wtr.write_record([
         "PR_Number",
@@ -51,24 +55,45 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         "Zombie_Deps",
         "Antipatterns",
         "Comment_Violations",
+        "Time_Saved_Hours",
+        "Operational_Savings_USD",
         "Timestamp",
     ])?;
 
     for entry in &entries {
+        // An entry is actionable (triage-taxing) if it meets any gate criterion.
+        let actionable = entry.slop_score >= 100
+            || entry.zombie_symbols_added > 0
+            || entry
+                .antipatterns
+                .iter()
+                .any(|a| a.contains("Hallucinated"));
+        let time_saved_h = if actionable { MINUTES_PER_TRIAGE / 60.0 } else { 0.0_f64 };
+        let savings_usd = time_saved_h * HOURLY_COST_USD;
+
+        let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
+        let score_str = entry.slop_score.to_string();
+        let dead_str = entry.dead_symbols_added.to_string();
+        let clones_str = entry.logic_clones_found.to_string();
+        let zombie_str = entry.zombie_symbols_added.to_string();
+        let zombie_deps_str = entry.zombie_deps.join(";");
+        let anti_str = entry.antipatterns.join(";");
+        let cviol_str = entry.comment_violations.join(";");
+        let time_str = format!("{:.4}", time_saved_h);
+        let savings_str = format!("{:.2}", savings_usd);
+
         wtr.write_record([
-            entry
-                .pr_number
-                .map(|n| n.to_string())
-                .unwrap_or_default()
-                .as_str(),
+            pr_num_str.as_str(),
             entry.author.as_deref().unwrap_or(""),
-            entry.slop_score.to_string().as_str(),
-            entry.dead_symbols_added.to_string().as_str(),
-            entry.logic_clones_found.to_string().as_str(),
-            entry.zombie_symbols_added.to_string().as_str(),
-            entry.zombie_deps.join(";").as_str(),
-            entry.antipatterns.join(";").as_str(),
-            entry.comment_violations.join(";").as_str(),
+            score_str.as_str(),
+            dead_str.as_str(),
+            clones_str.as_str(),
+            zombie_str.as_str(),
+            zombie_deps_str.as_str(),
+            anti_str.as_str(),
+            cviol_str.as_str(),
+            time_str.as_str(),
+            savings_str.as_str(),
             entry.timestamp.as_str(),
         ])?;
     }
