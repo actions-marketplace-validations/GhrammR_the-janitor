@@ -522,7 +522,7 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
     // ── Section 2: Structural Clones ───────────────────────────────────────
     out.push_str("## Structural Clones — Near-Duplicate PRs\n\n");
     out.push_str(
-        "*Detected via 64-hash MinHash LSH (Jaccard ≥ 0.70). \
+        "*Detected via 64-hash MinHash LSH (Jaccard >= 0.70). \
          Clone pairs share structurally identical diff content.*\n\n",
     );
 

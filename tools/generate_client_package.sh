@@ -22,7 +22,7 @@
 # Environment overrides:
 #   JANITOR          — janitor binary          (default: ./target/release/janitor)
 #   GAUNTLET_DIR     — clone parent directory  (default: ~/dev/gauntlet)
-#   PR_LIMIT         — max PRs to bounce       (default: 200)
+#   PR_LIMIT         — max PRs to bounce       (default: 5000)
 #   BOUNCE_TIMEOUT   — seconds per bounce      (default: 30)
 #   REGISTRY_TTL_MIN — registry max age (min)  (default: 120)
 #   OUTPUT_DIR       — where to write CSV+PDF  (default: current directory)
@@ -49,7 +49,7 @@ fi
 # ── Configuration ─────────────────────────────────────────────────────────────
 JANITOR="${JANITOR:-$(pwd)/target/release/janitor}"
 GAUNTLET_DIR="${GAUNTLET_DIR:-$HOME/dev/gauntlet}"
-PR_LIMIT="${PR_LIMIT:-200}"
+PR_LIMIT="${PR_LIMIT:-5000}"
 BOUNCE_TIMEOUT="${BOUNCE_TIMEOUT:-30}"
 REGISTRY_TTL_MIN="${REGISTRY_TTL_MIN:-120}"
 OUTPUT_DIR="${OUTPUT_DIR:-$(pwd)}"
@@ -287,29 +287,68 @@ echo   "  Hours reclaimed    : ${HOURS_SAVED}h  (\$${MONEY_SAVED})"
 echo -e "${GRN}══════════════════════════════════════════════════${NC}"
 echo ""
 
+# ── Helper: human-readable file size ──────────────────────────────────────────
+file_size_human() {
+    local file="$1"
+    local bytes
+    bytes=$(stat --format="%s" "$file" 2>/dev/null || stat -f "%z" "$file" 2>/dev/null || echo "0")
+    if [[ "$bytes" -ge 1048576 ]]; then
+        awk "BEGIN { printf \"%.1f MB\", $bytes/1048576 }"
+    elif [[ "$bytes" -ge 1024 ]]; then
+        awk "BEGIN { printf \"%.1f KB\", $bytes/1024 }"
+    else
+        echo "${bytes} B"
+    fi
+}
+
 # ── 6. Export CSV ─────────────────────────────────────────────────────────────
 step "Exporting CSV → $CSV_OUT"
-"$JANITOR" export \
+CSV_OK=false
+if "$JANITOR" export \
     --repo "$REPO_DIR" \
-    --out  "$CSV_OUT"
-info "CSV written: $CSV_OUT"
+    --out  "$CSV_OUT"; then
+    CSV_SIZE=$(file_size_human "$CSV_OUT")
+    info "CSV written: $CSV_OUT  (${CSV_SIZE})"
+    CSV_OK=true
+else
+    warn "CSV export failed — check bounce log at $REPO_DIR/.janitor/bounce_log.ndjson"
+fi
 
 echo ""
 
 # ── 7. Export PDF intelligence report ─────────────────────────────────────────
 step "Generating PDF intelligence report → $PDF_OUT"
-"$JANITOR" report \
+PDF_OK=false
+if "$JANITOR" report \
     --repo   "$REPO_DIR" \
     --top    50          \
     --format pdf         \
-    --out    "$PDF_OUT"
-info "PDF written: $PDF_OUT"
+    --out    "$PDF_OUT" 2>&1; then
+    PDF_SIZE=$(file_size_human "$PDF_OUT")
+    info "PDF written: $PDF_OUT  (${PDF_SIZE})"
+    PDF_OK=true
+else
+    warn "PDF generation failed."
+    warn "Requirements: pandoc + texlive-latex-recommended + texlive-fonts-recommended"
+    warn "Install: sudo apt-get install pandoc texlive-latex-recommended texlive-fonts-recommended"
+    warn "macOS:   brew install pandoc basictex && sudo tlmgr install newunicodechar"
+fi
 
 echo ""
 echo -e "${GRN}══════════════════════════════════════════════════${NC}"
 echo   "  CLIENT PACKAGE COMPLETE — $REPO_SLUG"
-echo   "  CSV  : $CSV_OUT"
-echo   "  PDF  : $PDF_OUT"
+if $CSV_OK; then
+    CSV_SIZE=$(file_size_human "$CSV_OUT")
+    echo   "  CSV  : $CSV_OUT  (${CSV_SIZE})"
+else
+    echo -e "  CSV  : ${RED}FAILED${NC}"
+fi
+if $PDF_OK; then
+    PDF_SIZE=$(file_size_human "$PDF_OUT")
+    echo   "  PDF  : $PDF_OUT  (${PDF_SIZE})"
+else
+    echo -e "  PDF  : ${RED}FAILED — run with pandoc+texlive installed${NC}"
+fi
 echo -e "${GRN}══════════════════════════════════════════════════${NC}"
 echo ""
 echo "  To reset and re-run from scratch:"

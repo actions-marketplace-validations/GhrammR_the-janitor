@@ -131,6 +131,17 @@ $endif$
 \newcommand{\VerbatimStringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
 \newcommand{\WarningTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
 
+% ── Unicode safety net (pdflatex cannot handle math-range Unicode natively) ───
+% Declare common symbols that may appear in antipattern descriptions or report
+% text so pdflatex does not abort with "Unicode character not set up for use".
+\usepackage{newunicodechar}
+\newunicodechar{≥}{\ensuremath{\geq}}
+\newunicodechar{≤}{\ensuremath{\leq}}
+\newunicodechar{→}{\ensuremath{\rightarrow}}
+\newunicodechar{←}{\ensuremath{\leftarrow}}
+\newunicodechar{≠}{\ensuremath{\neq}}
+\newunicodechar{…}{\ldots}
+
 % ── Pandoc internals ──────────────────────────────────────────────────────────
 % pandoc requires \tightlist to exist.
 \providecommand{\tightlist}{%
