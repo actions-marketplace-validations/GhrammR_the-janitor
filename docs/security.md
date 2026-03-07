@@ -161,7 +161,7 @@ Revocation is achieved by keypair rotation, not by a revocation list:
    the new verifying key — no database lookup, no network check, no revocation server.
 
 Rotation cadence and emergency SLA are documented in [Safety Guarantees → Cryptographic
-Key Rotation](safety.md#cryptographic-key-rotation--token-revocation).
+Key Rotation](safety.md).
 
 ### "Harvest Now, Decrypt Later" Resistance
 
