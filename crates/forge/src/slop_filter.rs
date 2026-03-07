@@ -640,11 +640,13 @@ pub fn bounce_git(
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         // Synthesise a virtual unified diff from the blob content.
-        let added_lines: String = std::str::from_utf8(blob_bytes)
-            .unwrap_or("")
-            .lines()
-            .map(|l| format!("+{l}\n"))
-            .collect();
+        let raw = std::str::from_utf8(blob_bytes).unwrap_or("");
+        let mut added_lines = String::with_capacity(raw.len() + raw.lines().count());
+        for l in raw.lines() {
+            added_lines.push('+');
+            added_lines.push_str(l);
+            added_lines.push('\n');
+        }
 
         if added_lines.is_empty() {
             continue;

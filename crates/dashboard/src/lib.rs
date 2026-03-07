@@ -44,10 +44,7 @@ pub fn draw_dashboard(registry: &SymbolRegistry) -> Result<(), Box<dyn Error>> {
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     registry: &SymbolRegistry,
-) -> io::Result<()>
-where
-    io::Error: From<B::Error>,
-{
+) -> io::Result<()> {
     // Calculate stats once
     let total_symbols = registry.len() as u64;
     let dead_candidates_iter = registry.entries.iter().filter(|e| e.protected_by.is_none());

@@ -1,0 +1,48 @@
+name: MSRV Check
+
+# Guards against Dependabot or manual dep bumps that silently require a Rust
+# version newer than the pinned 1.85.0 toolchain.  Runs `cargo +1.85.0 check`
+# against the exact locked dependency tree — the same check that surfaces the
+# "requires rustc X.Y.Z" error caught in #6.10.5 post-mortem.
+#
+# Trigger: every PR targeting main + every push to main.
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+# Deny all permissions at the workflow level; grant only what the job needs.
+permissions: read-all
+
+jobs:
+  msrv:
+    name: MSRV — Rust 1.85.0
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b # v2.15.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Install only the pinned stable toolchain — no additional components
+      # needed for a check-only pass.
+      - name: Install Rust 1.85.0
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup override set 1.85.0
+
+      # --locked: honour the committed Cargo.lock exactly.
+      # --workspace: include every crate (dashboard, forge, anatomist …).
+      # If any dependency declares rust-version > 1.85 this step fails with
+      # "error: rustc 1.85.0 is not supported by the following packages: …"
+      - name: cargo check (Rust 1.85.0, locked)
+        run: cargo +1.85.0 check --workspace --locked

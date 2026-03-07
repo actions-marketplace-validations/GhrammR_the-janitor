@@ -7,11 +7,12 @@ version = "6.10.4"
 edition = "2021"
 repository = "https://github.com/GhrammR/the-janitor"
 license = "BUSL-1.1"
+rust-version = "1.85"
 
 [workspace.dependencies]
 # Core
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "signal", "sync", "time"] }
-sysinfo = "0.38"
+sysinfo = "0.30"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1.10", features = ["v4"] }
