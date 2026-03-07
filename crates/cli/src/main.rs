@@ -2070,7 +2070,12 @@ fn cmd_bounce(
                         .into_iter()
                         .collect()
                 };
-                forge::slop_filter::check_hallucinated_fix(&mut score, body, &exts);
+                forge::slop_filter::check_hallucinated_fix(
+                    &mut score,
+                    body,
+                    &exts,
+                    repo_slug.unwrap_or(""),
+                );
             }
             (score, merkle_root, sig.min_hashes.to_vec(), blobs)
         }
@@ -2142,7 +2147,12 @@ fn cmd_bounce(
                 }
                 // Hallucinated security fix check (patch mode — all +++ b/ headers).
                 let changed_exts = forge::slop_filter::extract_all_patch_exts(&patch);
-                forge::slop_filter::check_hallucinated_fix(&mut score, body, &changed_exts);
+                forge::slop_filter::check_hallucinated_fix(
+                    &mut score,
+                    body,
+                    &changed_exts,
+                    repo_slug.unwrap_or(""),
+                );
             }
 
             // Extract per-file blobs from the unified diff for the zombie dep scan.

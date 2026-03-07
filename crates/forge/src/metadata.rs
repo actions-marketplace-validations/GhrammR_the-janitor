@@ -80,6 +80,23 @@ fn security_ac() -> &'static AhoCorasick {
     })
 }
 
+/// Extensions that are treated as code (not non-code) when the repository is
+/// classified as an IaC / package-collection repository.
+///
+/// In NixOS/nixpkgs and similar package-collection repos a security fix for a
+/// CVE is *legitimately* implemented by bumping a version in a `.nix` derivation
+/// and updating the corresponding `flake.lock` or `packages.json`.  Treating
+/// those files as non-code produces a false-positive "Hallucinated Security Fix"
+/// for what is actually valid, human-reviewed patch work.
+const IAC_CODE_EXTENSIONS: &[&str] = &["nix", "lock", "json"];
+
+/// Returns `true` when `repo_slug` looks like an IaC / package-collection
+/// repository that uses `.nix` / lockfiles as its primary source artefacts.
+fn is_iac_repo(repo_slug: &str) -> bool {
+    let s = repo_slug.to_ascii_lowercase();
+    s.contains("nixpkgs") || s.contains("/packages") || s.ends_with("packages")
+}
+
 /// Detect a "Hallucinated Security Fix" — a PR whose description contains
 /// high-stakes security language but whose changed files are all non-code.
 ///
@@ -101,9 +118,17 @@ fn security_ac() -> &'static AhoCorasick {
 ///
 /// Returns `None` when either condition is absent (no security claim, or at
 /// least one code file is present in the changeset).
+///
+/// ## IaC / Package-Collection Exemption
+///
+/// When `repo_slug` identifies an IaC repository (contains `"nixpkgs"` or
+/// `"packages"`), `.nix`, `.lock`, and `.json` extensions are reclassified as
+/// code.  A version bump in a Nix derivation is the canonical way to resolve a
+/// CVE in NixOS; flagging it as a hallucination would be incorrect.
 pub fn detect_hallucinated_fix(
     body: &str,
     file_extensions: &[String],
+    repo_slug: &str,
 ) -> Option<crate::slop_hunter::SlopFinding> {
     // Guard: nothing to flag on an empty body or empty changeset.
     if body.is_empty() || file_extensions.is_empty() {
@@ -133,9 +158,16 @@ pub fn detect_hallucinated_fix(
     }
     let keyword = matched_keyword?;
 
+    // For IaC repos (NixOS/nixpkgs, package collections), .nix/.lock/.json are
+    // legitimate code artefacts — reclassify them before the all-non-code check.
+    let iac = is_iac_repo(repo_slug);
+
     // Verify that every changed file extension is non-code.
     let all_non_code = file_extensions.iter().all(|ext| {
         let ext = ext.trim_start_matches('.');
+        if iac && IAC_CODE_EXTENSIONS.contains(&ext) {
+            return false; // counts as code in IaC repos
+        }
         NON_CODE_EXTENSIONS.contains(&ext)
     });
 
@@ -664,7 +696,7 @@ diff --git a/src/lib.rs b/src/lib.rs
     fn test_hallucinated_fix_cve_readme_only() {
         let body = "Fixes CVE-2026-9999: critical buffer overflow in auth module.";
         let exts = vec!["md".to_string()];
-        let finding = detect_hallucinated_fix(body, &exts);
+        let finding = detect_hallucinated_fix(body, &exts, "");
         assert!(finding.is_some(), "CVE claim + only .md → hallucinated fix");
         let desc = finding.unwrap().description;
         assert!(desc.contains("Hallucinated Security Fix"));
@@ -676,7 +708,7 @@ diff --git a/src/lib.rs b/src/lib.rs
         let body = "Fixes CVE-2026-9999: critical buffer overflow.";
         let exts = vec!["rs".to_string(), "md".to_string()];
         assert!(
-            detect_hallucinated_fix(body, &exts).is_none(),
+            detect_hallucinated_fix(body, &exts, "").is_none(),
             "code file present — should not flag"
         );
     }
@@ -686,7 +718,7 @@ diff --git a/src/lib.rs b/src/lib.rs
         let body = "Update README with better installation instructions.";
         let exts = vec!["md".to_string()];
         assert!(
-            detect_hallucinated_fix(body, &exts).is_none(),
+            detect_hallucinated_fix(body, &exts, "").is_none(),
             "no security keyword → no flag"
         );
     }
@@ -697,7 +729,7 @@ diff --git a/src/lib.rs b/src/lib.rs
         let body = "Follow the CVE-reporting process for disclosure.";
         let exts = vec!["md".to_string()];
         assert!(
-            detect_hallucinated_fix(body, &exts).is_none(),
+            detect_hallucinated_fix(body, &exts, "").is_none(),
             "CVE- not followed by digit — no flag"
         );
     }
@@ -717,15 +749,32 @@ diff --git a/src/lib.rs b/src/lib.rs
             ("vulnerability", "Fixes a critical vulnerability in login."),
         ];
         for (kw, body) in &bodies {
-            let finding = detect_hallucinated_fix(body, &non_code);
+            let finding = detect_hallucinated_fix(body, &non_code, "");
             assert!(finding.is_some(), "should flag keyword '{kw}' in: {body}");
         }
     }
 
     #[test]
     fn test_hallucinated_fix_empty_inputs() {
-        assert!(detect_hallucinated_fix("", &["md".to_string()]).is_none());
-        assert!(detect_hallucinated_fix("Fixes CVE-2026-1 buffer overflow", &[]).is_none());
+        assert!(detect_hallucinated_fix("", &["md".to_string()], "").is_none());
+        assert!(detect_hallucinated_fix("Fixes CVE-2026-1 buffer overflow", &[], "").is_none());
+    }
+
+    #[test]
+    fn test_hallucinated_fix_nixpkgs_nix_and_lock_not_flagged() {
+        // In NixOS/nixpkgs, bumping a .nix derivation + updating flake.lock IS
+        // the canonical way to resolve a CVE — must not be flagged.
+        let body = "Fixes CVE-2026-1234: bump libfoo to 1.2.3 to resolve heap overflow.";
+        let exts = vec!["nix".to_string(), "lock".to_string()];
+        assert!(
+            detect_hallucinated_fix(body, &exts, "NixOS/nixpkgs").is_none(),
+            "nix+lock in nixpkgs → legitimate IaC security fix, must not flag"
+        );
+        // Same PR in a non-IaC repo should still flag (lock is non-code there).
+        assert!(
+            detect_hallucinated_fix(body, &["lock".to_string()], "acme/myapp").is_some(),
+            "lock-only in non-IaC repo → hallucinated"
+        );
     }
 
     // --- Source scanning (tree-sitter) ---

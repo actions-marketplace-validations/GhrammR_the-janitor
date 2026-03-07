@@ -216,12 +216,14 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
 
     let mut sloppiest_users: Vec<UserStats> = user_map
         .iter()
-        .map(|(author, &(total_slop_score, total_pr_count, clean_pr_count))| UserStats {
-            author: author.clone(),
-            total_slop_score,
-            total_pr_count,
-            clean_pr_count,
-        })
+        .map(
+            |(author, &(total_slop_score, total_pr_count, clean_pr_count))| UserStats {
+                author: author.clone(),
+                total_slop_score,
+                total_pr_count,
+                clean_pr_count,
+            },
+        )
         .collect();
     sloppiest_users.sort_by(|a, b| b.total_slop_score.cmp(&a.total_slop_score));
     sloppiest_users.truncate(10);
@@ -229,12 +231,14 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
     let mut cleanest_users: Vec<UserStats> = user_map
         .iter()
         .filter(|(_, &(_, _, clean_pr))| clean_pr > 0)
-        .map(|(author, &(total_slop_score, total_pr_count, clean_pr_count))| UserStats {
-            author: author.clone(),
-            total_slop_score,
-            total_pr_count,
-            clean_pr_count,
-        })
+        .map(
+            |(author, &(total_slop_score, total_pr_count, clean_pr_count))| UserStats {
+                author: author.clone(),
+                total_slop_score,
+                total_pr_count,
+                clean_pr_count,
+            },
+        )
         .collect();
     cleanest_users.sort_by(|a, b| b.clean_pr_count.cmp(&a.clean_pr_count));
     cleanest_users.truncate(10);
@@ -328,6 +332,17 @@ fn detect_clone_pairs(entries: &[BounceLogEntry], threshold: f64) -> Vec<(usize,
 // Markdown renderer
 // ---------------------------------------------------------------------------
 
+/// Truncate an author handle to `max` chars with an ellipsis suffix to prevent
+/// table column bleeding in pandoc-generated LaTeX PDF output.
+fn trunc_author(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        let trimmed: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{}…", trimmed)
+    }
+}
+
 /// Renders the aggregated report as GitHub-flavored Markdown.
 ///
 /// Produces three sections:
@@ -386,7 +401,7 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
             out.push_str(&format!(
                 "| {} | `{}` | **{}** | {} | {} |\n",
                 i + 1,
-                u.author,
+                trunc_author(&u.author, 20),
                 u.total_slop_score,
                 u.total_pr_count,
                 u.clean_pr_count,
@@ -404,7 +419,7 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
             out.push_str(&format!(
                 "| {} | `{}` | **{}** | {} |\n",
                 i + 1,
-                u.author,
+                trunc_author(&u.author, 20),
                 u.clean_pr_count,
                 u.total_pr_count,
             ));
@@ -437,7 +452,7 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
                 .pr_number
                 .map(|n| format!("#{}", n))
                 .unwrap_or_else(|| "-".to_owned());
-            let author = e.author.as_deref().unwrap_or("-");
+            let author = trunc_author(e.author.as_deref().unwrap_or("-"), 20);
             out.push_str(&format!(
                 "| {} | {} | {} | **{}** | {} | {} | {} | {} |\n",
                 rank + 1,
@@ -458,22 +473,21 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
     if data.clean_top_indices.is_empty() {
         out.push_str("*No bounce data found.*\n\n");
     } else {
-        out.push_str("| Rank | PR | Author | Slop Score | Timestamp |\n");
-        out.push_str("|------|----|--------|------------|----------|\n");
+        out.push_str("| Rank | PR | Author | Slop Score |\n");
+        out.push_str("|------|----|--------|------------|\n");
         for (rank, &i) in data.clean_top_indices.iter().enumerate() {
             let e = &data.entries[i];
             let pr = e
                 .pr_number
                 .map(|n| format!("#{}", n))
                 .unwrap_or_else(|| "-".to_owned());
-            let author = e.author.as_deref().unwrap_or("-");
+            let author = trunc_author(e.author.as_deref().unwrap_or("-"), 20);
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} |\n",
                 rank + 1,
                 pr,
                 author,
                 e.slop_score,
-                e.timestamp,
             ));
         }
         out.push('\n');
@@ -529,7 +543,10 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
     if data.clone_pairs.is_empty() {
         out.push_str("*No structural clones detected.*\n\n");
     } else {
-        for (a, b) in &data.clone_pairs {
+        const CLONE_DISPLAY_CAP: usize = 20;
+        let total_pairs = data.clone_pairs.len();
+        let display_pairs = &data.clone_pairs[..total_pairs.min(CLONE_DISPLAY_CAP)];
+        for (a, b) in display_pairs {
             let ea = &data.entries[*a];
             let eb = &data.entries[*b];
             let pr_a = ea
@@ -540,11 +557,17 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
                 .pr_number
                 .map(|n| format!("#{}", n))
                 .unwrap_or_else(|| format!("entry-{}", b));
-            let auth_a = ea.author.as_deref().unwrap_or("unknown");
-            let auth_b = eb.author.as_deref().unwrap_or("unknown");
+            let auth_a = trunc_author(ea.author.as_deref().unwrap_or("unknown"), 20);
+            let auth_b = trunc_author(eb.author.as_deref().unwrap_or("unknown"), 20);
             out.push_str(&format!(
                 "- **PR {}** ({}) is a structural clone of **PR {}** ({})\n",
                 pr_a, auth_a, pr_b, auth_b
+            ));
+        }
+        if total_pairs > CLONE_DISPLAY_CAP {
+            out.push_str(&format!(
+                "\n*…and {} more pairs. See the attached CSV for complete forensic data.*\n",
+                total_pairs - CLONE_DISPLAY_CAP
             ));
         }
     }

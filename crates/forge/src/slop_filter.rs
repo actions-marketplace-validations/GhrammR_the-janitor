@@ -527,8 +527,15 @@ pub fn extract_all_patch_exts(patch: &str) -> Vec<String> {
 ///
 /// This function is a no-op when `pr_body` is empty or no security keyword is
 /// found, so it is always safe to call unconditionally.
-pub fn check_hallucinated_fix(score: &mut SlopScore, pr_body: &str, changed_exts: &[String]) {
-    if let Some(finding) = crate::metadata::detect_hallucinated_fix(pr_body, changed_exts) {
+pub fn check_hallucinated_fix(
+    score: &mut SlopScore,
+    pr_body: &str,
+    changed_exts: &[String],
+    repo_slug: &str,
+) {
+    if let Some(finding) =
+        crate::metadata::detect_hallucinated_fix(pr_body, changed_exts, repo_slug)
+    {
         score.hallucinated_security_fix = 1;
         score.antipattern_details.push(finding.description);
     }
@@ -950,7 +957,7 @@ mod tests {
         let pr_body = "Fixes CVE-2026-9999: critical buffer overflow in the auth module.";
         let changed_exts = vec!["md".to_string()];
         let mut score = SlopScore::default();
-        check_hallucinated_fix(&mut score, pr_body, &changed_exts);
+        check_hallucinated_fix(&mut score, pr_body, &changed_exts, "");
         assert_eq!(
             score.hallucinated_security_fix, 1,
             "CVE claim + only README.md changed → hallucinated security fix"
@@ -970,7 +977,7 @@ mod tests {
         let pr_body = "Fixes CVE-2026-9999: buffer overflow in allocator.";
         let changed_exts = vec!["rs".to_string(), "md".to_string()];
         let mut score = SlopScore::default();
-        check_hallucinated_fix(&mut score, pr_body, &changed_exts);
+        check_hallucinated_fix(&mut score, pr_body, &changed_exts, "");
         assert_eq!(
             score.hallucinated_security_fix, 0,
             "Rust file present — legitimate fix, must not flag"
@@ -983,7 +990,7 @@ mod tests {
         let pr_body = "Update README with installation instructions.";
         let changed_exts = vec!["md".to_string()];
         let mut score = SlopScore::default();
-        check_hallucinated_fix(&mut score, pr_body, &changed_exts);
+        check_hallucinated_fix(&mut score, pr_body, &changed_exts, "");
         assert_eq!(
             score.hallucinated_security_fix, 0,
             "no security keyword → no flag"
@@ -995,7 +1002,7 @@ mod tests {
         let pr_body = "Patches a memory leak in the connection pool configuration.";
         let changed_exts = vec!["json".to_string(), "yaml".to_string()];
         let mut score = SlopScore::default();
-        check_hallucinated_fix(&mut score, pr_body, &changed_exts);
+        check_hallucinated_fix(&mut score, pr_body, &changed_exts, "");
         assert_eq!(
             score.hallucinated_security_fix, 1,
             "json+yaml only → hallucinated"
