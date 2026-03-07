@@ -1,6 +1,12 @@
 set shell := ["bash", "-c"]
 export PATH := env_var("HOME") + "/.local/bin:" + env_var("PATH")
 
+# ── Hermetic shell ───────────────────────────────────────────────────────────
+# Drop into the Nix development environment defined in flake.nix.
+# All tools (Rust, pandoc, ffmpeg, gh, jq) are pinned to exact versions.
+shell:
+	nix develop
+
 # 1. INITIALIZATION
 init:
 	@echo "🏗️ Constructing Sovereign Workspace..."
@@ -22,15 +28,30 @@ init:
 	@echo "✅ Workspace initialized. Tabs enforced."
 
 # 2. DEVELOPMENT
+# If Nix is installed and we are NOT already inside the Nix dev shell,
+# re-exec this recipe under `nix develop` so the pinned toolchain is used.
+# Inside the Nix shell IN_NIX_SHELL is set by nix itself, preventing loops.
 audit:
-	@echo "🔍 Auditing Codebase..."
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -z "${IN_NIX_SHELL:-}" ]] && command -v nix &>/dev/null; then
+	    echo "↳ Entering Nix hermetic shell for reproducible audit..."
+	    exec nix develop --command just audit
+	fi
+	echo "🔍 Auditing Codebase..."
 	cargo fmt --all -- --check
 	cargo clippy --workspace -- -D warnings
 	cargo check --workspace
 	cargo test --workspace
-	@echo "✅ System Clean."
+	echo "✅ System Clean."
 
 build:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -z "${IN_NIX_SHELL:-}" ]] && command -v nix &>/dev/null; then
+	    echo "↳ Entering Nix hermetic shell for reproducible build..."
+	    exec nix develop --command just build
+	fi
 	cargo build --release --workspace
 
 clean:

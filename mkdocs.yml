@@ -24,6 +24,7 @@ nav:
   - Overview: index.md
   - Safety Guarantees: safety.md
   - Security Posture: security.md
+  - Build Reproducibility: infrastructure.md
   - Benchmarks: benchmarks.md
   - Pricing: pricing.md
   - Detection Engine:
