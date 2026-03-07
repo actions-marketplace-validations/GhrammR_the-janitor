@@ -971,7 +971,7 @@ mod tests {
         );
         assert!(!score.is_clean());
         assert_eq!(score.antipattern_details.len(), 1);
-        assert!(score.antipattern_details[0].contains("Hallucinated Security Fix"));
+        assert!(score.antipattern_details[0].contains("Unverified Security Bump"));
     }
 
     #[test]

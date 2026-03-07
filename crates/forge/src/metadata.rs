@@ -179,8 +179,9 @@ pub fn detect_hallucinated_fix(
         start_byte: 0,
         end_byte: 0,
         description: format!(
-            "Hallucinated Security Fix: PR body claims '{}' but only non-code files \
-             changed ({}). A real security fix requires modifying source code.",
+            "Unverified Security Bump: PR metadata claims security fix \
+             (keyword: '{}'), but diff lacks substantial logic changes \
+             (only non-code files changed: {}).",
             keyword,
             file_extensions.join(", ")
         ),
@@ -699,7 +700,7 @@ diff --git a/src/lib.rs b/src/lib.rs
         let finding = detect_hallucinated_fix(body, &exts, "");
         assert!(finding.is_some(), "CVE claim + only .md → hallucinated fix");
         let desc = finding.unwrap().description;
-        assert!(desc.contains("Hallucinated Security Fix"));
+        assert!(desc.contains("Unverified Security Bump"));
         assert!(desc.contains("CVE-"));
     }
 

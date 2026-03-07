@@ -2229,7 +2229,7 @@ fn cmd_bounce(
         println!("| Comment violations: {:>19} |", score.comment_violations);
         println!("| Unlinked PR      : {:>20} |", score.unlinked_pr);
         println!(
-            "| Hallucinated fix : {:>20} |",
+            "| Unverified sec fix: {:>19} |",
             score.hallucinated_security_fix
         );
         println!("+------------------------------------------+");

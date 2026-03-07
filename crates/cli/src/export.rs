@@ -67,7 +67,7 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
             || entry
                 .antipatterns
                 .iter()
-                .any(|a| a.contains("Hallucinated"));
+                .any(|a| a.contains("Unverified Security Bump"));
         let time_saved_h = if actionable {
             MINUTES_PER_TRIAGE / 60.0
         } else {

@@ -121,12 +121,6 @@ pub struct ReportData {
     pub total_reclaimed_minutes: f64,
     /// Top 10 contributors ranked by cumulative slop score descending.
     pub sloppiest_users: Vec<UserStats>,
-    /// Top 10 contributors ranked by count of zero-score PRs descending.
-    pub cleanest_users: Vec<UserStats>,
-    /// Indices into `entries` sorted by `slop_score` ascending, capped at 50.
-    ///
-    /// Zero-score PRs appear first, providing the "Top 50 Cleanest PRs" list.
-    pub clean_top_indices: Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -228,26 +222,6 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
     sloppiest_users.sort_by(|a, b| b.total_slop_score.cmp(&a.total_slop_score));
     sloppiest_users.truncate(10);
 
-    let mut cleanest_users: Vec<UserStats> = user_map
-        .iter()
-        .filter(|(_, &(_, _, clean_pr))| clean_pr > 0)
-        .map(
-            |(author, &(total_slop_score, total_pr_count, clean_pr_count))| UserStats {
-                author: author.clone(),
-                total_slop_score,
-                total_pr_count,
-                clean_pr_count,
-            },
-        )
-        .collect();
-    cleanest_users.sort_by(|a, b| b.clean_pr_count.cmp(&a.clean_pr_count));
-    cleanest_users.truncate(10);
-
-    // ── Top 50 Cleanest PRs (ascending slop score) ────────────────────────
-    let mut clean_order: Vec<usize> = (0..entries.len()).collect();
-    clean_order.sort_by(|&a, &b| entries[a].slop_score.cmp(&entries[b].slop_score));
-    let clean_top_indices = clean_order.into_iter().take(50).collect::<Vec<_>>();
-
     ReportData {
         entries,
         slop_top_indices,
@@ -255,8 +229,6 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
         zombie_indices,
         total_reclaimed_minutes,
         sloppiest_users,
-        cleanest_users,
-        clean_top_indices,
     }
 }
 
@@ -266,8 +238,8 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
 /// - **Blocked**: `slop_score >= 100` (gate threshold reached)
 /// - **Shotgun**: `zombie_symbols_added > 0` — re-introduction of previously dead symbols;
 ///   contributes ×15 to the score and signals adversarial or AI-generated content
-/// - **Hallucination**: an antipattern description contains "Hallucinated" — either a
-///   hallucinated security fix claim or a hallucinated import
+/// - **Unverified Security Bump**: an antipattern description contains "Unverified Security Bump" —
+///   PR body claims a security fix but diff only touches non-code files
 ///
 /// Note: `zombie_deps` (manifest-level zombie dependencies) is intentionally excluded.
 /// It is informational metadata that may reflect false positives from base-manifest packages
@@ -277,7 +249,36 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
 fn is_actionable(e: &BounceLogEntry) -> bool {
     e.slop_score >= 100
         || e.zombie_symbols_added > 0
-        || e.antipatterns.iter().any(|a| a.contains("Hallucinated"))
+        || e.antipatterns.iter().any(|a| a.contains("Unverified Security Bump"))
+}
+
+/// Returns a short, human-readable label for the dominant violation in a bounce entry.
+///
+/// Priority mirrors scoring weights: antipatterns (×50) > zombie symbols (×15) >
+/// dead symbols (×10) > logic clones (×5) > zombie deps (informational).
+fn primary_violation(e: &BounceLogEntry) -> &'static str {
+    if !e.antipatterns.is_empty() {
+        if e.antipatterns
+            .iter()
+            .any(|a| a.contains("Unverified Security Bump"))
+        {
+            return "Unverified Security Bump";
+        }
+        return "Language Antipattern";
+    }
+    if e.zombie_symbols_added > 0 {
+        return "Zombie Symbol Reintroduction";
+    }
+    if e.dead_symbols_added > 0 {
+        return "Dead Symbol Added";
+    }
+    if e.logic_clones_found > 0 {
+        return "Structural Clone";
+    }
+    if !e.zombie_deps.is_empty() {
+        return "Zombie Dependency";
+    }
+    "Score Threshold"
 }
 
 /// Detect pairs of entries whose MinHash Jaccard similarity exceeds `threshold`.
@@ -440,27 +441,10 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
         out.push('\n');
     }
 
-    // ── Top 10 Cleanest Contributors ───────────────────────────────────────
-    if !data.cleanest_users.is_empty() {
-        out.push_str("## Top 10 Cleanest Contributors\n\n");
-        out.push_str("| Rank | Author | Clean PRs (Score 0) | PRs Audited |\n");
-        out.push_str("|------|--------|---------------------|-------------|\n");
-        for (i, u) in data.cleanest_users.iter().enumerate() {
-            out.push_str(&format!(
-                "| {} | `{}` | **{}** | {} |\n",
-                i + 1,
-                html_escape(&trunc_author(&u.author, 20)),
-                u.clean_pr_count,
-                u.total_pr_count,
-            ));
-        }
-        out.push('\n');
-    }
-
     out.push_str("---\n\n");
 
-    // ── Section 1: Slop Top ────────────────────────────────────────────────
-    out.push_str("## Top 50 Sloppiest PRs — Ranked by Structural Debt Score\n\n");
+    // ── Section 1: Top 10 High-Risk PRs ───────────────────────────────────
+    out.push_str("## Top 10 High-Risk PRs\n\n");
 
     if data.slop_top_indices.is_empty() {
         out.push_str(
@@ -468,13 +452,9 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
              to populate the log.*\n\n",
         );
     } else {
-        out.push_str(
-            "| Rank | PR | Author | Slop Score | Zombie Syms | Antipatterns |\n",
-        );
-        out.push_str(
-            "|------|----|--------|------------|-------------|---------------|\n",
-        );
-        for (rank, &i) in data.slop_top_indices.iter().enumerate() {
+        out.push_str("| Rank | PR | Author | Slop Score | Primary Violation |\n");
+        out.push_str("|------|----|--------|------------|-------------------|\n");
+        for (rank, &i) in data.slop_top_indices.iter().take(10).enumerate() {
             let e = &data.entries[i];
             let pr = e
                 .pr_number
@@ -482,42 +462,16 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
                 .unwrap_or_else(|| "-".to_owned());
             let author = html_escape(&trunc_author(e.author.as_deref().unwrap_or("-"), 20));
             out.push_str(&format!(
-                "| {} | {} | {} | **{}** | {} | {} |\n",
+                "| {} | {} | {} | **{}** | {} |\n",
                 rank + 1,
                 pr,
                 author,
                 e.slop_score,
-                e.zombie_symbols_added,
-                e.antipatterns.len(),
+                primary_violation(e),
             ));
         }
     }
     out.push('\n');
-
-    // ── Top 50 Cleanest PRs (ascending slop score) ────────────────────────
-    out.push_str("## Top 50 Cleanest PRs — Zero / Low Slop Score\n\n");
-    if data.clean_top_indices.is_empty() {
-        out.push_str("*No bounce data found.*\n\n");
-    } else {
-        out.push_str("| Rank | PR | Author | Slop Score |\n");
-        out.push_str("|------|----|--------|------------|\n");
-        for (rank, &i) in data.clean_top_indices.iter().enumerate() {
-            let e = &data.entries[i];
-            let pr = e
-                .pr_number
-                .map(|n| format!("#{}", n))
-                .unwrap_or_else(|| "-".to_owned());
-            let author = html_escape(&trunc_author(e.author.as_deref().unwrap_or("-"), 20));
-            out.push_str(&format!(
-                "| {} | {} | {} | {} |\n",
-                rank + 1,
-                pr,
-                author,
-                e.slop_score,
-            ));
-        }
-        out.push('\n');
-    }
 
     // ── Antipattern & violation detail expansion ────────────────────────────
     // The table above shows only the count. This sub-section prints the actual
@@ -603,16 +557,13 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
     }
     out.push('\n');
 
-    // ── Section 3: Zombie Dependencies ─────────────────────────────────────
-    out.push_str("## Zombie Dependencies — Declared But Never Imported\n\n");
-    out.push_str(
-        "*Packages added to `Cargo.toml`, `package.json`, or `requirements.txt` \
-         that do not appear in any source file import statement.*\n\n",
-    );
-
-    if data.zombie_indices.is_empty() {
-        out.push_str("*No zombie dependencies detected.*\n\n");
-    } else {
+    // ── Section 3: Zombie Dependencies (suppressed when none detected) ──────
+    if !data.zombie_indices.is_empty() {
+        out.push_str("## Zombie Dependencies — Declared But Never Imported\n\n");
+        out.push_str(
+            "*Packages added to `Cargo.toml`, `package.json`, or `requirements.txt` \
+             that do not appear in any source file import statement.*\n\n",
+        );
         for &i in &data.zombie_indices {
             let e = &data.entries[i];
             let pr = e
@@ -628,8 +579,8 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
                 deps.join("`, `")
             ));
         }
+        out.push('\n');
     }
-    out.push('\n');
 
     out
 }
