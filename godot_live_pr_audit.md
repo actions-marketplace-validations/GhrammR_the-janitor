@@ -4,7 +4,7 @@
 
 **Repository**: `godot`
 
-**Total PRs analyzed**: 4663
+**Total PRs analyzed**: 4991
 
 ---
 
@@ -14,9 +14,9 @@
 
 | Metric | Value |
 |--------|-------|
-| Actionable intercepts (Blocked / Zombie / Hallucination) | **105** |
-| **Total engineering time reclaimed** | **21.0 hours** |
-| **Estimated operational savings** | **$2100** |
+| Actionable intercepts (Blocked / Zombie / Hallucination) | **4** |
+| **Total engineering time reclaimed** | **0.8 hours** |
+| **Estimated operational savings** | **$80** |
 
 > Based on **12-minute industry triage baseline** × **$100/hr** loaded engineering cost. Source: [Workslop research](https://builtin.com/articles/what-is-workslop).
 
@@ -26,195 +26,226 @@
 
 | Rank | PR | Author | Slop Score | Dead Added | Clones | Zombie Syms | Antipatterns |
 |------|----|--------|------------|------------|--------|-------------|---------------|
-| 1 | #116301 | neikeq | **34885** | 0 | 3143 | 0 | 383 |
-| 2 | #116300 | neikeq | **34245** | 0 | 3139 | 0 | 371 |
-| 3 | #116365 | dalexeev | **7480** | 0 | 2 | 0 | 149 |
-| 4 | #55220 | DevinPentecost | **5005** | 0 | 277 | 0 | 72 |
-| 5 | #83505 | magian1127 | **2410** | 0 | 18 | 0 | 46 |
-| 6 | #96498 | Repiteo | **1865** | 124 | 121 | 0 | 0 |
-| 7 | #114690 | adamscott | **1855** | 2 | 3 | 0 | 36 |
-| 8 | #116673 | adamscott | **1635** | 3 | 7 | 0 | 31 |
-| 9 | #85683 | Repiteo | **1330** | 90 | 82 | 0 | 0 |
-| 10 | #105818 | Vulwsztyn | **840** | 42 | 80 | 0 | 0 |
-| 11 | #73730 | raulsntos | **820** | 0 | 0 | 0 | 16 |
-| 12 | #91992 | Repiteo | **730** | 48 | 46 | 0 | 0 |
-| 13 | #111404 | GreenCrowDev | **720** | 0 | 0 | 0 | 14 |
-| 14 | #102412 | GreenCrowDev | **720** | 0 | 0 | 0 | 14 |
-| 15 | #114872 | kitbdev | **620** | 0 | 0 | 0 | 12 |
-| 16 | #100447 | darksylinc | **570** | 0 | 0 | 0 | 11 |
-| 17 | #86267 | reduz | **555** | 33 | 41 | 0 | 0 |
-| 18 | #109080 | dsnopek | **495** | 6 | 13 | 0 | 7 |
-| 19 | #105529 | m4gr3d | **495** | 6 | 13 | 0 | 7 |
-| 20 | #96833 | Ryan-000 | **470** | 0 | 0 | 0 | 9 |
-| 21 | #86946 | poohcom1 | **375** | 0 | 1 | 0 | 7 |
-| 22 | #90356 | nlupugla | **365** | 19 | 31 | 0 | 0 |
-| 23 | #106122 | beicause | **330** | 0 | 22 | 0 | 4 |
-| 24 | #99017 | tGautot | **325** | 0 | 1 | 0 | 6 |
-| 25 | #115610 | Repiteo | **320** | 0 | 0 | 0 | 6 |
-| 26 | #112224 | Repiteo | **320** | 0 | 0 | 0 | 6 |
-| 27 | #114787 | ColinSORourke | **305** | 0 | 57 | 0 | 0 |
-| 28 | #82198 | nlupugla | **305** | 17 | 23 | 0 | 0 |
-| 29 | #49763 | benjarmstrong | **295** | 1 | 3 | 0 | 5 |
-| 30 | #105478 | cruglet | **285** | 0 | 53 | 0 | 0 |
-| 31 | #104980 | Dowsley | **270** | 0 | 0 | 0 | 5 |
-| 32 | #111262 | leandro-benedet-garcia | **235** | 16 | 11 | 0 | 0 |
-| 33 | #88831 | nlupugla | **235** | 15 | 13 | 0 | 0 |
-| 34 | #108553 | kdada | **230** | 2 | 18 | 0 | 2 |
-| 35 | #29892 | Aa20475 | **230** | 1 | 0 | 0 | 4 |
-| 36 | #113784 | Kaleb-Reid | **225** | 0 | 1 | 0 | 4 |
-| 37 | #102138 | adamscott | **220** | 0 | 0 | 0 | 4 |
-| 38 | #59444 | lawnjelly | **210** | 7 | 8 | 0 | 2 |
-| 39 | #105685 | Repiteo | **190** | 11 | 12 | 0 | 0 |
-| 40 | #92002 | Repiteo | **190** | 15 | 4 | 0 | 0 |
-| 41 | #99806 | Ivorforce | **185** | 9 | 15 | 0 | 0 |
-| 42 | #93838 | EnlightenedOne | **185** | 15 | 3 | 0 | 0 |
-| 43 | #62130 | lyuma | **180** | 0 | 32 | 0 | 0 |
-| 44 | #91664 | Nazarwadim | **175** | 10 | 11 | 0 | 0 |
-| 45 | #116963 | Repiteo | **170** | 0 | 0 | 0 | 1 |
-| 46 | #116777 | Jordyfel | **170** | 0 | 0 | 0 | 1 |
-| 47 | #116578 | MrLawrenceKwan | **170** | 0 | 0 | 0 | 1 |
-| 48 | #116373 | Calinou | **170** | 0 | 0 | 0 | 1 |
-| 49 | #114347 | Nintorch | **170** | 0 | 0 | 0 | 1 |
-| 50 | #114338 | Nintorch | **170** | 0 | 0 | 0 | 3 |
+| 1 | #496717 | r-ryantm | **170** | 0 | 0 | 0 | 1 |
+| 2 | #483864 | r-ryantm | **170** | 0 | 0 | 0 | 1 |
+| 3 | #484741 | jerith666 | **120** | 0 | 0 | 0 | 1 |
+| 4 | #490636 | LeSuisse | **100** | 0 | 0 | 0 | 1 |
+| 5 | #483788 | theoparis | **85** | 4 | 5 | 0 | 0 |
+| 6 | #497151 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 7 | #497149 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 8 | #497147 | knl | **70** | 0 | 0 | 0 | 0 |
+| 9 | #497145 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 10 | #497143 | atlarator | **70** | 0 | 0 | 0 | 0 |
+| 11 | #497142 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 12 | #497141 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 13 | #497138 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 14 | #497133 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 15 | #497131 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 16 | #497129 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 17 | #497126 | app/nixpkgs-ci | **70** | 0 | 0 | 0 | 0 |
+| 18 | #497117 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 19 | #497116 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 20 | #497115 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 21 | #497111 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 22 | #497109 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 23 | #497108 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 24 | #497100 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 25 | #497099 | sarahec | **70** | 0 | 0 | 0 | 0 |
+| 26 | #497097 | mfrw | **70** | 0 | 0 | 0 | 0 |
+| 27 | #497096 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 28 | #497093 | kossLAN | **70** | 0 | 0 | 0 | 0 |
+| 29 | #497092 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 30 | #497089 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 31 | #497088 | ddogfoodd | **70** | 0 | 0 | 0 | 0 |
+| 32 | #497085 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 33 | #497071 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 34 | #497065 | aaronjheng | **70** | 0 | 0 | 0 | 0 |
+| 35 | #497064 | sarahec | **70** | 0 | 0 | 0 | 0 |
+| 36 | #497058 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 37 | #497054 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 38 | #497053 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 39 | #497050 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 40 | #497049 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 41 | #497041 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 42 | #497040 | app/nixpkgs-ci | **70** | 0 | 0 | 0 | 0 |
+| 43 | #497038 | filip2cz | **70** | 0 | 0 | 0 | 0 |
+| 44 | #497037 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 45 | #497036 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 46 | #497035 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 47 | #497029 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 48 | #497027 | sebastianpetrovski | **70** | 0 | 0 | 0 | 0 |
+| 49 | #497014 | r-ryantm | **70** | 0 | 0 | 0 | 0 |
+| 50 | #497012 | ddogfoodd | **70** | 0 | 0 | 0 | 0 |
 
 ### Antipattern & Violation Details
 
-- **PR #116301** (`neikeq`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x383)
-- **PR #116300** (`neikeq`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x371)
-- **PR #116365** (`dalexeev`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x149)
-- **PR #55220** (`DevinPentecost`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x72)
-- **PR #83505** (`magian1127`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x46)
-- **PR #114690** (`adamscott`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x36)
-- **PR #116673** (`adamscott`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x31)
-- **PR #73730** (`raulsntos`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x16)
-- **PR #111404** (`GreenCrowDev`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x14)
-- **PR #102412** (`GreenCrowDev`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x14)
-- **PR #114872** (`kitbdev`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x12)
-- **PR #100447** (`darksylinc`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x11)
-- **PR #109080** (`dsnopek`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x7)
-- **PR #105529** (`m4gr3d`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x7)
-- **PR #96833** (`Ryan-000`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x9)
-- **PR #86946** (`poohcom1`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x7)
-- **PR #106122** (`beicause`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x4)
-- **PR #99017** (`tGautot`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x6)
-- **PR #115610** (`Repiteo`):
-  - Raw `delete`: manual memory management is error-prone — let unique_ptr/shared_ptr handle deallocation (x6)
-- **PR #112224** (`Repiteo`):
-  - Raw `delete`: manual memory management is error-prone — let unique_ptr/shared_ptr handle deallocation (x6)
-- **PR #49763** (`benjarmstrong`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x2)
-  - Raw `delete`: manual memory management is error-prone — let unique_ptr/shared_ptr handle deallocation (x3)
-- **PR #104980** (`Dowsley`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x3)
-  - Raw `delete`: manual memory management is error-prone — let unique_ptr/shared_ptr handle deallocation (x2)
-- **PR #108553** (`kdada`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x2)
-- **PR #29892** (`Aa20475`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x4)
-- **PR #113784** (`Kaleb-Reid`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x4)
-- **PR #102138** (`adamscott`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x4)
-- **PR #59444** (`lawnjelly`):
-  - Raw `delete`: manual memory management is error-prone — let unique_ptr/shared_ptr handle deallocation (x2)
-- **PR #116963** (`Repiteo`):
-  - Hallucinated Security Fix: PR body claims 'RCE' but only non-code files changed (yml). A real security fix requires modifying source code.
-- **PR #116777** (`Jordyfel`):
-  - Hallucinated Security Fix: PR body claims 'RCE' but only non-code files changed (xml). A real security fix requires modifying source code.
-- **PR #116578** (`MrLawrenceKwan`):
-  - Hallucinated Security Fix: PR body claims 'RCE' but only non-code files changed (xml). A real security fix requires modifying source code.
-- **PR #116373** (`Calinou`):
-  - Hallucinated Security Fix: PR body claims 'RCE' but only non-code files changed (xml). A real security fix requires modifying source code.
-- **PR #114347** (`Nintorch`):
-  - Hallucinated Security Fix: PR body claims 'RCE' but only non-code files changed (xml). A real security fix requires modifying source code.
-- **PR #114338** (`Nintorch`):
-  - Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() for exception-safe RAII ownership (x3)
+- **PR #496717** (`r-ryantm`):
+  - Hallucinated Security Fix: PR body claims 'RCE' but only non-code files changed (json). A real security fix requires modifying source code.
+- **PR #483864** (`r-ryantm`):
+  - Hallucinated Security Fix: PR body claims 'RCE' but only non-code files changed (json). A real security fix requires modifying source code.
+- **PR #484741** (`jerith666`):
+  - Hallucinated Security Fix: PR body claims 'RCE' but only non-code files changed (json). A real security fix requires modifying source code.
+- **PR #490636** (`LeSuisse`):
+  - Hallucinated Security Fix: PR body claims 'CVE-' but only non-code files changed (json). A real security fix requires modifying source code.
 
 ## Structural Clones — Near-Duplicate PRs
 
 *Detected via 64-hash MinHash LSH (Jaccard ≥ 0.70). Clone pairs share structurally identical diff content.*
 
-- **PR #116833** (TitanNano) is a structural clone of **PR #116600** (TitanNano)
-- **PR #116828** (ryevdokimov) is a structural clone of **PR #116194** (ryevdokimov)
-- **PR #116673** (adamscott) is a structural clone of **PR #114690** (adamscott)
-- **PR #116667** (TokageItLab) is a structural clone of **PR #116427** (TokageItLab)
-- **PR #116560** (TheDying0fLight) is a structural clone of **PR #113060** (kitbdev)
-- **PR #116510** (ashtonmeuser) is a structural clone of **PR #116230** (ashtonmeuser)
-- **PR #116494** (Jordyfel) is a structural clone of **PR #100206** (L2750558108)
-- **PR #116351** (bruvzg) is a structural clone of **PR #116349** (bruvzg)
-- **PR #116301** (neikeq) is a structural clone of **PR #116300** (neikeq)
-- **PR #115160** (Saulo-de-Souza) is a structural clone of **PR #109466** (niYaDevelop)
-- **PR #114957** (LucaTuerk) is a structural clone of **PR #92159** (2nafish117)
-- **PR #114149** (DarioSamo) is a structural clone of **PR #113853** (DarioSamo)
-- **PR #114061** (dsnopek) is a structural clone of **PR #113823** (Alex2782)
-- **PR #113736** (benjaminc247) is a structural clone of **PR #104408** (Dowsley)
-- **PR #113444** (TokageItLab) is a structural clone of **PR #112308** (Ryan-000)
-- **PR #113240** (mihe) is a structural clone of **PR #112764** (mihe)
-- **PR #112933** (SeremTitus) is a structural clone of **PR #107608** (SeremTitus)
-- **PR #112933** (SeremTitus) is a structural clone of **PR #107227** (SeremTitus)
-- **PR #112553** (GabCoolDude) is a structural clone of **PR #105123** (CrabNickolson)
-- **PR #111582** (bruvzg) is a structural clone of **PR #97034** (sievaxx)
-- **PR #111262** (leandro-benedet-garcia) is a structural clone of **PR #88831** (nlupugla)
-- **PR #111104** (bruvzg) is a structural clone of **PR #107615** (bruvzg)
-- **PR #111065** (KoBeWi) is a structural clone of **PR #111051** (KoBeWi)
-- **PR #111045** (Kaleb-Reid) is a structural clone of **PR #110911** (Kaleb-Reid)
-- **PR #109834** (Rindbee) is a structural clone of **PR #108553** (kdada)
-- **PR #109080** (dsnopek) is a structural clone of **PR #105529** (m4gr3d)
-- **PR #109002** (fire) is a structural clone of **PR #108976** (fire)
-- **PR #108738** (IphStich) is a structural clone of **PR #81698** (Repiteo)
-- **PR #108405** (BlueCube3310) is a structural clone of **PR #100790** (BlueCube3310)
-- **PR #107608** (SeremTitus) is a structural clone of **PR #107227** (SeremTitus)
-- **PR #105788** (Nallebeorn) is a structural clone of **PR #75023** (RedworkDE)
-- **PR #105753** (Ivorforce) is a structural clone of **PR #105710** (Ivorforce)
-- **PR #103744** (Grublady) is a structural clone of **PR #89193** (YeldhamDev)
-- **PR #101261** (wareya) is a structural clone of **PR #101203** (wareya)
-- **PR #100383** (StaydMcMuffin) is a structural clone of **PR #100348** (StaydMcMuffin)
-- **PR #100256** (Grublady) is a structural clone of **PR #95262** (KoBeWi)
-- **PR #98538** (zjin123) is a structural clone of **PR #98335** (zjin123)
-- **PR #92067** (morganwesemann) is a structural clone of **PR #71420** (realkotob)
-- **PR #90520** (RandomShaper) is a structural clone of **PR #90437** (RandomShaper)
-- **PR #90355** (Geometror) is a structural clone of **PR #73037** (hmans)
-- **PR #83992** (SlugFiller) is a structural clone of **PR #80458** (SlugFiller)
-- **PR #76527** (resistor) is a structural clone of **PR #76496** (resistor)
-- **PR #76354** (joao-pedro-braz) is a structural clone of **PR #75965** (joao-pedro-braz)
-- **PR #74230** (baptr) is a structural clone of **PR #74148** (baptr)
-- **PR #73173** (hpvb) is a structural clone of **PR #58900** (nonunknown)
-- **PR #70085** (M-O-Marmalade) is a structural clone of **PR #68768** (M-O-Marmalade)
-- **PR #65143** (Mickeon) is a structural clone of **PR #64274** (Mickeon)
-- **PR #64066** (Razoric480) is a structural clone of **PR #64065** (Razoric480)
-- **PR #61424** (stebulba) is a structural clone of **PR #53462** (stebulba)
-- **PR #60212** (app/) is a structural clone of **PR #60146** (app/)
-- **PR #60212** (app/) is a structural clone of **PR #60095** (app/)
-- **PR #60157** (japhib) is a structural clone of **PR #60156** (japhib)
-- **PR #60146** (app/) is a structural clone of **PR #60095** (app/)
-- **PR #58319** (jasonwinterpixel) is a structural clone of **PR #58318** (jasonwinterpixel)
-- **PR #57014** (wareya) is a structural clone of **PR #56419** (wareya)
-- **PR #56533** (madmiraal) is a structural clone of **PR #56532** (madmiraal)
-- **PR #48066** (naithar) is a structural clone of **PR #48065** (naithar)
-- **PR #41180** (TypeOverride2) is a structural clone of **PR #41168** (TypeOverride2)
-- **PR #39362** (madmiraal) is a structural clone of **PR #39361** (madmiraal)
+- **PR #497153** (r-ryantm) is a structural clone of **PR #462671** (r-ryantm)
+- **PR #497153** (r-ryantm) is a structural clone of **PR #462670** (r-ryantm)
+- **PR #497153** (r-ryantm) is a structural clone of **PR #462669** (r-ryantm)
+- **PR #497153** (r-ryantm) is a structural clone of **PR #460534** (r-ryantm)
+- **PR #497071** (r-ryantm) is a structural clone of **PR #496700** (VlaDexa)
+- **PR #497019** (r-ryantm) is a structural clone of **PR #495977** (r-ryantm)
+- **PR #496893** (app/nixpkgs-ci) is a structural clone of **PR #496892** (app/nixpkgs-ci)
+- **PR #496761** (r-ryantm) is a structural clone of **PR #495977** (r-ryantm)
+- **PR #496738** (drawbu) is a structural clone of **PR #491863** (caverav)
+- **PR #496738** (drawbu) is a structural clone of **PR #456597** (giggio)
+- **PR #496738** (drawbu) is a structural clone of **PR #450944** (GaetanLepage)
+- **PR #496638** (r-ryantm) is a structural clone of **PR #496637** (r-ryantm)
+- **PR #496626** (alexfmpe) is a structural clone of **PR #496489** (alexfmpe)
+- **PR #496548** (markus1189) is a structural clone of **PR #489516** (mirkolenz)
+- **PR #496540** (r-ryantm) is a structural clone of **PR #496539** (r-ryantm)
+- **PR #496540** (r-ryantm) is a structural clone of **PR #486194** (r-ryantm)
+- **PR #496540** (r-ryantm) is a structural clone of **PR #486192** (r-ryantm)
+- **PR #496539** (r-ryantm) is a structural clone of **PR #486194** (r-ryantm)
+- **PR #496539** (r-ryantm) is a structural clone of **PR #486192** (r-ryantm)
+- **PR #496244** (app/nixpkgs-ci) is a structural clone of **PR #473215** (clotodex)
+- **PR #496239** (r-ryantm) is a structural clone of **PR #496238** (r-ryantm)
+- **PR #496239** (r-ryantm) is a structural clone of **PR #496237** (r-ryantm)
+- **PR #496239** (r-ryantm) is a structural clone of **PR #496236** (r-ryantm)
+- **PR #496238** (r-ryantm) is a structural clone of **PR #496237** (r-ryantm)
+- **PR #496238** (r-ryantm) is a structural clone of **PR #496236** (r-ryantm)
+- **PR #496237** (r-ryantm) is a structural clone of **PR #496236** (r-ryantm)
+- **PR #496153** (r-ryantm) is a structural clone of **PR #496152** (r-ryantm)
+- **PR #495903** (martinjlowm) is a structural clone of **PR #462640** (shilch)
+- **PR #495867** (corngood) is a structural clone of **PR #495836** (corngood)
+- **PR #495534** (r-ryantm) is a structural clone of **PR #495523** (trofi)
+- **PR #495371** (chordtoll) is a structural clone of **PR #489847** (dguibert)
+- **PR #495371** (chordtoll) is a structural clone of **PR #486773** (r-ryantm)
+- **PR #494584** (r-ryantm) is a structural clone of **PR #494580** (r-ryantm)
+- **PR #494458** (r-ryantm) is a structural clone of **PR #494457** (r-ryantm)
+- **PR #494139** (r-ryantm) is a structural clone of **PR #455154** (r-ryantm)
+- **PR #494087** (r-ryantm) is a structural clone of **PR #481841** (r-ryantm)
+- **PR #493906** (sharno) is a structural clone of **PR #456597** (giggio)
+- **PR #493906** (sharno) is a structural clone of **PR #454950** (0x4A6F)
+- **PR #493906** (sharno) is a structural clone of **PR #450944** (GaetanLepage)
+- **PR #493838** (r-ryantm) is a structural clone of **PR #456400** (r-ryantm)
+- **PR #493632** (r-ryantm) is a structural clone of **PR #469988** (r-ryantm)
+- **PR #492638** (r-ryantm) is a structural clone of **PR #492637** (r-ryantm)
+- **PR #492638** (r-ryantm) is a structural clone of **PR #492636** (r-ryantm)
+- **PR #492638** (r-ryantm) is a structural clone of **PR #492635** (r-ryantm)
+- **PR #492637** (r-ryantm) is a structural clone of **PR #492636** (r-ryantm)
+- **PR #492637** (r-ryantm) is a structural clone of **PR #492635** (r-ryantm)
+- **PR #492636** (r-ryantm) is a structural clone of **PR #492635** (r-ryantm)
+- **PR #492465** (r-ryantm) is a structural clone of **PR #492464** (r-ryantm)
+- **PR #492194** (greg-hellings) is a structural clone of **PR #491862** (marcin-serwin)
+- **PR #492164** (griffi-gh) is a structural clone of **PR #466070** (hesiod)
+- **PR #491863** (caverav) is a structural clone of **PR #476478** (Squawkykaka)
+- **PR #491513** (jackrosenberg) is a structural clone of **PR #490985** (jackrosenberg)
+- **PR #491088** (KristijanZic) is a structural clone of **PR #491081** (KristijanZic)
+- **PR #491085** (KristijanZic) is a structural clone of **PR #491078** (KristijanZic)
+- **PR #491035** (r-ryantm) is a structural clone of **PR #490292** (r-ryantm)
+- **PR #490853** (soywod) is a structural clone of **PR #489918** (soywod)
+- **PR #490769** (raboof) is a structural clone of **PR #463029** (raboof)
+- **PR #490227** (colonelpanic8) is a structural clone of **PR #490053** (colonelpanic8)
+- **PR #489847** (dguibert) is a structural clone of **PR #486773** (r-ryantm)
+- **PR #489184** (r-ryantm) is a structural clone of **PR #489179** (r-ryantm)
+- **PR #489184** (r-ryantm) is a structural clone of **PR #489178** (r-ryantm)
+- **PR #489179** (r-ryantm) is a structural clone of **PR #489178** (r-ryantm)
+- **PR #488605** (colonelpanic8) is a structural clone of **PR #487226** (r-ryantm)
+- **PR #488274** (gerandios) is a structural clone of **PR #488271** (gerandios)
+- **PR #487402** (Ilosariph) is a structural clone of **PR #471579** (themg95)
+- **PR #486194** (r-ryantm) is a structural clone of **PR #486192** (r-ryantm)
+- **PR #485932** (r-ryantm) is a structural clone of **PR #485931** (r-ryantm)
+- **PR #485873** (itsmyowninvention) is a structural clone of **PR #456597** (giggio)
+- **PR #485063** (r-ryantm) is a structural clone of **PR #485061** (r-ryantm)
+- **PR #484807** (r-ryantm) is a structural clone of **PR #480880** (rhoriguchi)
+- **PR #484311** (r-ryantm) is a structural clone of **PR #484310** (r-ryantm)
+- **PR #483214** (r-ryantm) is a structural clone of **PR #473546** (Ramblurr)
+- **PR #482816** (tomodachi94) is a structural clone of **PR #482815** (tomodachi94)
+- **PR #482656** (r-ryantm) is a structural clone of **PR #481208** (r-ryantm)
+- **PR #482656** (r-ryantm) is a structural clone of **PR #481207** (r-ryantm)
+- **PR #482656** (r-ryantm) is a structural clone of **PR #481206** (r-ryantm)
+- **PR #481208** (r-ryantm) is a structural clone of **PR #481207** (r-ryantm)
+- **PR #481208** (r-ryantm) is a structural clone of **PR #481206** (r-ryantm)
+- **PR #481207** (r-ryantm) is a structural clone of **PR #481206** (r-ryantm)
+- **PR #480694** (r-ryantm) is a structural clone of **PR #480693** (r-ryantm)
+- **PR #479829** (daniel-fahey) is a structural clone of **PR #476478** (Squawkykaka)
+- **PR #479829** (daniel-fahey) is a structural clone of **PR #468630** (dasj19)
+- **PR #479829** (daniel-fahey) is a structural clone of **PR #454950** (0x4A6F)
+- **PR #479588** (r-ryantm) is a structural clone of **PR #479587** (r-ryantm)
+- **PR #479473** (r-ryantm) is a structural clone of **PR #452596** (r-ryantm)
+- **PR #479467** (r-ryantm) is a structural clone of **PR #473472** (r-ryantm)
+- **PR #479453** (r-ryantm) is a structural clone of **PR #469954** (r-ryantm)
+- **PR #478131** (l1npengtul) is a structural clone of **PR #478118** (l1npengtul)
+- **PR #478118** (l1npengtul) is a structural clone of **PR #478112** (l1npengtul)
+- **PR #477046** (r-ryantm) is a structural clone of **PR #455154** (r-ryantm)
+- **PR #476478** (Squawkykaka) is a structural clone of **PR #468630** (dasj19)
+- **PR #476478** (Squawkykaka) is a structural clone of **PR #458826** (Shiphan)
+- **PR #476478** (Squawkykaka) is a structural clone of **PR #454950** (0x4A6F)
+- **PR #476478** (Squawkykaka) is a structural clone of **PR #450944** (GaetanLepage)
+- **PR #475298** (r-ryantm) is a structural clone of **PR #475214** (r-ryantm)
+- **PR #472632** (MostlyKIGuess) is a structural clone of **PR #468630** (dasj19)
+- **PR #472632** (MostlyKIGuess) is a structural clone of **PR #458826** (Shiphan)
+- **PR #472632** (MostlyKIGuess) is a structural clone of **PR #456597** (giggio)
+- **PR #472632** (MostlyKIGuess) is a structural clone of **PR #454950** (0x4A6F)
+- **PR #469678** (ShamrockLee) is a structural clone of **PR #466743** (ShamrockLee)
+- **PR #469485** (corngood) is a structural clone of **PR #463385** (r-ryantm)
+- **PR #468854** (r-ryantm) is a structural clone of **PR #466831** (r-ryantm)
+- **PR #468854** (r-ryantm) is a structural clone of **PR #466830** (r-ryantm)
+- **PR #468854** (r-ryantm) is a structural clone of **PR #466829** (r-ryantm)
+- **PR #468854** (r-ryantm) is a structural clone of **PR #466827** (r-ryantm)
+- **PR #468854** (r-ryantm) is a structural clone of **PR #466825** (r-ryantm)
+- **PR #468630** (dasj19) is a structural clone of **PR #454950** (0x4A6F)
+- **PR #467957** (r-ryantm) is a structural clone of **PR #464406** (shymega)
+- **PR #466831** (r-ryantm) is a structural clone of **PR #466830** (r-ryantm)
+- **PR #466831** (r-ryantm) is a structural clone of **PR #466829** (r-ryantm)
+- **PR #466831** (r-ryantm) is a structural clone of **PR #466827** (r-ryantm)
+- **PR #466831** (r-ryantm) is a structural clone of **PR #466825** (r-ryantm)
+- **PR #466830** (r-ryantm) is a structural clone of **PR #466829** (r-ryantm)
+- **PR #466830** (r-ryantm) is a structural clone of **PR #466827** (r-ryantm)
+- **PR #466830** (r-ryantm) is a structural clone of **PR #466825** (r-ryantm)
+- **PR #466829** (r-ryantm) is a structural clone of **PR #466827** (r-ryantm)
+- **PR #466829** (r-ryantm) is a structural clone of **PR #466825** (r-ryantm)
+- **PR #466827** (r-ryantm) is a structural clone of **PR #466825** (r-ryantm)
+- **PR #466070** (hesiod) is a structural clone of **PR #454950** (0x4A6F)
+- **PR #465192** (r-ryantm) is a structural clone of **PR #455547** (r-ryantm)
+- **PR #463858** (marcin-serwin) is a structural clone of **PR #463857** (marcin-serwin)
+- **PR #462671** (r-ryantm) is a structural clone of **PR #462670** (r-ryantm)
+- **PR #462671** (r-ryantm) is a structural clone of **PR #462669** (r-ryantm)
+- **PR #462671** (r-ryantm) is a structural clone of **PR #460534** (r-ryantm)
+- **PR #462670** (r-ryantm) is a structural clone of **PR #462669** (r-ryantm)
+- **PR #462670** (r-ryantm) is a structural clone of **PR #460534** (r-ryantm)
+- **PR #462669** (r-ryantm) is a structural clone of **PR #460534** (r-ryantm)
+- **PR #462464** (mrtnvgr) is a structural clone of **PR #462243** (mrtnvgr)
+- **PR #462464** (mrtnvgr) is a structural clone of **PR #461829** (mrtnvgr)
+- **PR #462243** (mrtnvgr) is a structural clone of **PR #461894** (mrtnvgr)
+- **PR #462243** (mrtnvgr) is a structural clone of **PR #461829** (mrtnvgr)
+- **PR #461894** (mrtnvgr) is a structural clone of **PR #461829** (mrtnvgr)
+- **PR #461524** (mrtnvgr) is a structural clone of **PR #461472** (mrtnvgr)
+- **PR #461478** (mrtnvgr) is a structural clone of **PR #461473** (mrtnvgr)
+- **PR #461478** (mrtnvgr) is a structural clone of **PR #461472** (mrtnvgr)
+- **PR #461473** (mrtnvgr) is a structural clone of **PR #461472** (mrtnvgr)
+- **PR #460391** (gesperon) is a structural clone of **PR #460390** (gesperon)
+- **PR #459402** (r-ryantm) is a structural clone of **PR #459401** (r-ryantm)
+- **PR #458826** (Shiphan) is a structural clone of **PR #456597** (giggio)
+- **PR #458826** (Shiphan) is a structural clone of **PR #454950** (0x4A6F)
+- **PR #458826** (Shiphan) is a structural clone of **PR #450944** (GaetanLepage)
+- **PR #458464** (r-ryantm) is a structural clone of **PR #458463** (r-ryantm)
+- **PR #456597** (giggio) is a structural clone of **PR #456584** (giggio)
+- **PR #456597** (giggio) is a structural clone of **PR #454950** (0x4A6F)
+- **PR #456597** (giggio) is a structural clone of **PR #450944** (GaetanLepage)
+- **PR #454950** (0x4A6F) is a structural clone of **PR #450944** (GaetanLepage)
 
 ## Zombie Dependencies — Declared But Never Imported
 
 *Packages added to `Cargo.toml`, `package.json`, or `requirements.txt` that do not appear in any source file import statement.*
 
-- **PR #106607** (adamscott): `@eslint/js`, `@html-eslint/eslint-plugin`, `@html-eslint/parser`, `@stylistic/eslint-plugin`, `@types/node`, `eslint-plugin-html`, `espree`, `globals`, `jiti`
+- **PR #479442** (Profpatsch): `serde_json`
+- **PR #477829** (alemonmk): `data-encoding`, `env_logger`, `nix-nar`, `yarn-lock-parser`
+- **PR #476531** (soyouzpanda): `@electron/asar`, `@electron/remote`, `@jellybrick/mpris-service`, `electron-log`, `electron-settings`, `electron-updater`, `eventemitter2`, `i18next`, `i18next-node-fs-backend`, `i18next-sprintf-postprocessor`, `inversify`, `isomorphic-fetch`, `js-yaml`, `lodash.debounce`, `lodash.get`, `macos-version`, `prettier`, `raven`, `reflect-metadata`, `semver`, `uuid`, `electron`, `electron-builder`
+- **PR #456663** (mrene): `is-number`, `is-odd`
+- **PR #453904** (aMOPel): `serde_json`
 

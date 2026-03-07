@@ -102,13 +102,19 @@ fi
 # ── PR cache: one batch API call for all metadata ─────────────────────────────
 mkdir -p "$(dirname "$CACHE_FILE")" "$(dirname "$PROGRESS_FILE")"
 
+# Invalidate cache if it pre-dates the 'mergeable' field addition.
+if [[ -f "$CACHE_FILE" ]] && ! jq -e '.[0] | has("mergeable")' "$CACHE_FILE" >/dev/null 2>&1; then
+    warn "Cache missing 'mergeable' field — refreshing (stale schema)."
+    rm -f "$CACHE_FILE"
+fi
+
 if [[ ! -f "$CACHE_FILE" ]]; then
     info "Fetching up to $PR_LIMIT open PRs from $REPO_SLUG (1 API call)..."
     gh pr list \
         --repo  "$REPO_SLUG" \
         --state open \
         --limit "$PR_LIMIT" \
-        --json  number,author,body \
+        --json  number,author,body,mergeable \
         > "$CACHE_FILE"
     CACHED=$(jq 'length' "$CACHE_FILE")
     info "Cached $CACHED PRs → $CACHE_FILE"
@@ -150,9 +156,10 @@ UNLINKED_COUNT=0; COMMENT_VIOLATIONS=0; HIGH_SCORE=0; HIGH_PR=0
 # ── Per-PR bounce loop ────────────────────────────────────────────────────────
 INDEX=0
 while IFS= read -r PR; do
-    NUMBER=$(echo "$PR" | jq -r '.number')
-    AUTHOR=$(echo "$PR" | jq -r '.author.login // "unknown"')
-    BODY=$(echo   "$PR" | jq -r '.body // ""' | head -c "$BODY_MAX_BYTES" | tr -d '\000')
+    NUMBER=$(   echo "$PR" | jq -r '.number')
+    AUTHOR=$(   echo "$PR" | jq -r '.author.login // "unknown"')
+    BODY=$(     echo "$PR" | jq -r '.body // ""' | head -c "$BODY_MAX_BYTES" | tr -d '\000')
+    MERGEABLE=$(echo "$PR" | jq -r '.mergeable // "UNKNOWN"')
 
     INDEX=$((INDEX + 1))
 
@@ -162,6 +169,12 @@ while IFS= read -r PR; do
     fi
 
     printf "  [%4d/%d] #%-5s %-20s  " "$INDEX" "$TOTAL" "$NUMBER" "($AUTHOR)"
+
+    # ── Skip conflicting PRs — diff is meaningless until rebased ───────────────
+    if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
+        echo "[SKIP: Conflict]"
+        SKIPPED=$((SKIPPED + 1)); continue
+    fi
 
     # ── Fetch PR diff via gh (same approach as ultimate_gauntlet.sh) ───────────
     PATCH_FILE=$(mktemp /tmp/crucible_XXXXXX.patch)

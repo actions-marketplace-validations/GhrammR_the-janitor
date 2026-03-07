@@ -2,7 +2,7 @@ name: "CodeQL"
 
 on:
   push:
-    branches: [ "main" ]
+    branches:[ "main" ]
   pull_request:
     branches: [ "main" ]
   schedule:
@@ -10,12 +10,17 @@ on:
 
 jobs:
   analyze:
-    name: Analyze (rust)
+    name: Analyze (${{ matrix.language }})
     runs-on: 'ubuntu-latest'
     permissions:
       security-events: write
       actions: read
       contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'rust', 'actions' ]
 
     steps:
     - name: Harden Runner
@@ -29,10 +34,10 @@ jobs:
     - name: Initialize CodeQL
       uses: github/codeql-action/init@c793b717bc78562f491db7b0e93a3a178b099162 # v4.32.5
       with:
-        languages: rust
+        languages: ${{ matrix.language }}
         build-mode: none
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@c793b717bc78562f491db7b0e93a3a178b099162 # v4.32.5
       with:
-        category: "/language:rust"
+        category: "/language:${{matrix.language}}"

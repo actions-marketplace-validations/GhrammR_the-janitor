@@ -68,7 +68,11 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
                 .antipatterns
                 .iter()
                 .any(|a| a.contains("Hallucinated"));
-        let time_saved_h = if actionable { MINUTES_PER_TRIAGE / 60.0 } else { 0.0_f64 };
+        let time_saved_h = if actionable {
+            MINUTES_PER_TRIAGE / 60.0
+        } else {
+            0.0_f64
+        };
         let savings_usd = time_saved_h * HOURLY_COST_USD;
 
         let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
