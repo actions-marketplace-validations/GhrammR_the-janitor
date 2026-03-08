@@ -14,9 +14,12 @@
 //! | `Dead_Code_Count` | `dead_symbols_added` | Functions re-added from registry |
 //! | `Logic_Clones` | `logic_clones_found` | BLAKE3/SimHash clone pairs |
 //! | `Zombie_Syms` | `zombie_symbols_added` | Verbatim dead-body reintroductions |
-//! | `Zombie_Deps` | `zombie_deps` | Dep names joined with `;` |
-//! | `Antipatterns` | `antipatterns` | Violation descriptions joined with `;` |
-//! | `Comment_Violations` | `comment_violations` | Phrase + line joined with `;` |
+//! | `Zombie_Deps` | `zombie_deps` | Dep names joined with `; ` |
+//! | `Antipatterns` | `antipatterns` | Violation descriptions joined with `; ` |
+//! | `Comment_Violations` | `comment_violations` | Phrase + line joined with `; ` |
+//! | `Violation_Reasons` | synthesized | Human-readable forensic summary of all flags |
+//! | `Time_Saved_Hours` | computed | 0.2h per actionable intercept |
+//! | `Operational_Savings_USD` | computed | Time × $100/hr loaded cost |
 //! | `Timestamp` | `timestamp` | ISO 8601 UTC |
 
 use anyhow::Result;
@@ -57,6 +60,7 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         "Zombie_Deps",
         "Antipatterns",
         "Comment_Violations",
+        "Violation_Reasons",
         "Time_Saved_Hours",
         "Operational_Savings_USD",
         "Timestamp",
@@ -84,27 +88,13 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         let clones_str = entry.logic_clones_found.to_string();
         let zombie_str = entry.zombie_symbols_added.to_string();
         let zombie_deps_str = entry.zombie_deps.join("; ");
-
-        // Antipatterns: use stored descriptions when available.
-        // For legacy log entries that recorded a non-zero score but predate the
-        // antipattern_details field, compute the residual score to detect missing data.
-        let anti_str = if !entry.antipatterns.is_empty() {
-            entry.antipatterns.join("; ")
-        } else {
-            let known_score = entry.dead_symbols_added * 10
-                + entry.logic_clones_found * 5
-                + entry.zombie_symbols_added * 15
-                + entry.unlinked_pr * 20
-                + entry.comment_violations.len() as u32 * 5;
-            let residual = entry.slop_score.saturating_sub(known_score);
-            if residual > 0 {
-                "Unknown Antipattern".to_owned()
-            } else {
-                String::new()
-            }
-        };
-
+        let anti_str = entry.antipatterns.join("; ");
         let cviol_str = entry.comment_violations.join("; ");
+
+        // ── Violation_Reasons: forensic summary synthesized from all flags ──
+        // Ordered by scoring weight (descending) so the dominant reason appears first.
+        let violation_reasons = build_violation_reasons(entry);
+
         let time_str = format!("{:.4}", time_saved_h);
         let savings_str = format!("{:.2}", savings_usd);
 
@@ -119,6 +109,7 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
             zombie_deps_str.as_str(),
             anti_str.as_str(),
             cviol_str.as_str(),
+            violation_reasons.as_str(),
             time_str.as_str(),
             savings_str.as_str(),
             entry.timestamp.as_str(),
@@ -129,4 +120,78 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
 
     println!("Exported {} entries → {}", entries.len(), out.display());
     Ok(())
+}
+
+/// Build a human-readable forensic summary for the `Violation_Reasons` CSV column.
+///
+/// Synthesizes every flag in the [`BounceLogEntry`] into a semicolon-separated
+/// list ordered by scoring weight (heaviest penalty first):
+///
+/// | Priority | Reason label | Weight |
+/// |----------|-------------|--------|
+/// | 1 | Antipattern descriptions (verbatim) | ×50 each |
+/// | 2 | Zombie Symbol Reintroduction | ×15 each |
+/// | 3 | Dead Symbol Added | ×10 each |
+/// | 4 | Logic Clone | ×5 each |
+/// | 5 | Comment Violation | ×5 each |
+/// | 6 | Unlinked PR | ×20 flat |
+/// | 7 | Zombie Dependency: <names> | informational |
+///
+/// Returns an empty string when no flags are set.
+///
+/// [`BounceLogEntry`]: crate::report::BounceLogEntry
+fn build_violation_reasons(entry: &crate::report::BounceLogEntry) -> String {
+    let mut reasons: Vec<String> = Vec::new();
+
+    // Antipatterns first — each carries ×50 weight.
+    for ap in &entry.antipatterns {
+        reasons.push(ap.clone());
+    }
+
+    // Zombie symbol reintroduction — ×15 each.
+    if entry.zombie_symbols_added > 0 {
+        reasons.push(format!(
+            "Zombie Symbol Reintroduction (×{})",
+            entry.zombie_symbols_added
+        ));
+    }
+
+    // Dead symbol introduction — ×10 each.
+    if entry.dead_symbols_added > 0 {
+        reasons.push(format!(
+            "Dead Symbol Added (×{})",
+            entry.dead_symbols_added
+        ));
+    }
+
+    // Logic clones — ×5 each.
+    if entry.logic_clones_found > 0 {
+        reasons.push(format!(
+            "Structural Clone (×{})",
+            entry.logic_clones_found
+        ));
+    }
+
+    // Comment violations — ×5 each, include matched phrases.
+    if !entry.comment_violations.is_empty() {
+        reasons.push(format!(
+            "Comment Violation: {}",
+            entry.comment_violations.join(", ")
+        ));
+    }
+
+    // Unlinked PR — ×20 flat penalty.
+    if entry.unlinked_pr > 0 {
+        reasons.push("Unlinked PR".to_owned());
+    }
+
+    // Zombie dependencies — informational (not score-bearing directly).
+    if !entry.zombie_deps.is_empty() {
+        reasons.push(format!(
+            "Zombie Dependency: {}",
+            entry.zombie_deps.join(", ")
+        ));
+    }
+
+    reasons.join("; ")
 }
