@@ -3,31 +3,31 @@
 //! Reads `.janitor/bounce_log.ndjson` and streams each entry as a CSV row,
 //! suitable for loading into Excel, Google Sheets, or a pandas DataFrame.
 //!
-//! ## Columns
+//! ## Columns (14 total)
 //!
-//! | Column | Source field | Notes |
-//! |--------|-------------|-------|
-//! | `PR_Number` | `pr_number` | Empty string when absent |
-//! | `Author` | `author` | Empty string when absent |
-//! | `Score` | `slop_score` | Composite weighted score |
-//! | `Unlinked_PR` | `unlinked_pr` | 1 if no issue link in PR body, else 0 |
-//! | `Dead_Code_Count` | `dead_symbols_added` | Functions re-added from registry |
-//! | `Logic_Clones` | `logic_clones_found` | BLAKE3/SimHash clone pairs |
-//! | `Zombie_Syms` | `zombie_symbols_added` | Verbatim dead-body reintroductions |
-//! | `Zombie_Deps` | `zombie_deps` | Dep names joined with `; ` |
-//! | `Antipatterns` | `antipatterns` | Violation descriptions joined with `; ` |
-//! | `Comment_Violations` | `comment_violations` | Phrase + line joined with `; ` |
-//! | `Violation_Reasons` | synthesized | Human-readable forensic summary of all flags |
-//! | `Time_Saved_Hours` | computed | 0.2h per actionable intercept |
-//! | `Operational_Savings_USD` | computed | Time × $100/hr loaded cost |
-//! | `Timestamp` | `timestamp` | ISO 8601 UTC |
+//! | # | Column | Notes |
+//! |---|--------|-------|
+//! | 1 | `PR_Number` | Empty string when absent |
+//! | 2 | `Author` | Empty string when absent |
+//! | 3 | `Score` | Composite weighted slop score |
+//! | 4 | `Mesa_Triggered` | Reserved for SaaS; always `FALSE` in CLI |
+//! | 5 | `Trust_Delta` | Reserved for SaaS; always `0` in CLI |
+//! | 6 | `Unlinked_PR` | `1` if no issue link detected, else `0` |
+//! | 7 | `Dead_Code_Count` | Functions re-added from the dead-symbol registry |
+//! | 8 | `Logic_Clones` | SimHash clone pairs within the patch |
+//! | 9 | `Zombie_Syms` | Verbatim dead-body reintroductions |
+//! | 10 | `Zombie_Deps` | Manifest-declared deps never imported; joined with `\|` |
+//! | 11 | `Violation_Reasons` | Human-readable audit trail; all flags joined with `\|` |
+//! | 12 | `Time_Saved_Hours` | 0.2 h per actionable intercept |
+//! | 13 | `Operational_Savings_USD` | Time × $100/hr loaded engineering cost |
+//! | 14 | `Timestamp` | ISO 8601 UTC |
 
 use anyhow::Result;
 use std::path::Path;
 
 /// Export the bounce log at `<repo>/.janitor/bounce_log.ndjson` to a CSV file.
 ///
-/// Creates or overwrites `out`.  Returns an error when the bounce log is absent
+/// Creates or overwrites `out`. Returns an error when the bounce log is absent
 /// or the output file cannot be written.
 pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
     let janitor_dir = repo.join(".janitor");
@@ -48,18 +48,18 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
     const MINUTES_PER_TRIAGE: f64 = 12.0;
     const HOURLY_COST_USD: f64 = 100.0;
 
-    // Header row.
+    // Exact 14-column header schema.
     wtr.write_record([
         "PR_Number",
         "Author",
         "Score",
+        "Mesa_Triggered",
+        "Trust_Delta",
         "Unlinked_PR",
         "Dead_Code_Count",
         "Logic_Clones",
         "Zombie_Syms",
         "Zombie_Deps",
-        "Antipatterns",
-        "Comment_Violations",
         "Violation_Reasons",
         "Time_Saved_Hours",
         "Operational_Savings_USD",
@@ -67,13 +67,14 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
     ])?;
 
     for entry in &entries {
-        // An entry is actionable (triage-taxing) if it meets any gate criterion.
+        // Actionable = any gate criterion met.
         let actionable = entry.slop_score >= 100
             || entry.zombie_symbols_added > 0
             || entry
                 .antipatterns
                 .iter()
                 .any(|a| a.contains("Unverified Security Bump"));
+
         let time_saved_h = if actionable {
             MINUTES_PER_TRIAGE / 60.0
         } else {
@@ -86,15 +87,9 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         let unlinked_str = entry.unlinked_pr.to_string();
         let dead_str = entry.dead_symbols_added.to_string();
         let clones_str = entry.logic_clones_found.to_string();
-        let zombie_str = entry.zombie_symbols_added.to_string();
-        let zombie_deps_str = entry.zombie_deps.join("; ");
-        let anti_str = entry.antipatterns.join("; ");
-        let cviol_str = entry.comment_violations.join("; ");
-
-        // ── Violation_Reasons: forensic summary synthesized from all flags ──
-        // Ordered by scoring weight (descending) so the dominant reason appears first.
+        let zombie_syms_str = entry.zombie_symbols_added.to_string();
+        let zombie_deps_str = entry.zombie_deps.join(" | ");
         let violation_reasons = build_violation_reasons(entry);
-
         let time_str = format!("{:.4}", time_saved_h);
         let savings_str = format!("{:.2}", savings_usd);
 
@@ -102,13 +97,13 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
             pr_num_str.as_str(),
             entry.author.as_deref().unwrap_or(""),
             score_str.as_str(),
+            "FALSE",        // Mesa_Triggered — SaaS reserved
+            "0",            // Trust_Delta   — SaaS reserved
             unlinked_str.as_str(),
             dead_str.as_str(),
             clones_str.as_str(),
-            zombie_str.as_str(),
+            zombie_syms_str.as_str(),
             zombie_deps_str.as_str(),
-            anti_str.as_str(),
-            cviol_str.as_str(),
             violation_reasons.as_str(),
             time_str.as_str(),
             savings_str.as_str(),
@@ -117,81 +112,94 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
     }
 
     wtr.flush()?;
-
     println!("Exported {} entries → {}", entries.len(), out.display());
     Ok(())
 }
 
-/// Build a human-readable forensic summary for the `Violation_Reasons` CSV column.
+/// Build the `Violation_Reasons` string for one [`BounceLogEntry`].
 ///
-/// Synthesizes every flag in the [`BounceLogEntry`] into a semicolon-separated
-/// list ordered by scoring weight (heaviest penalty first):
+/// Synthesises every flag stored in the entry into a `" | "`-separated list.
+/// Ordered by scoring weight (heaviest first) so the dominant reason leads.
 ///
-/// | Priority | Reason label | Weight |
-/// |----------|-------------|--------|
-/// | 1 | Antipattern descriptions (verbatim) | ×50 each |
-/// | 2 | Zombie Symbol Reintroduction | ×15 each |
-/// | 3 | Dead Symbol Added | ×10 each |
-/// | 4 | Logic Clone | ×5 each |
-/// | 5 | Comment Violation | ×5 each |
-/// | 6 | Unlinked PR | ×20 flat |
-/// | 7 | Zombie Dependency: <names> | informational |
-///
-/// Returns an empty string when no flags are set.
+/// For legacy log entries written before `unlinked_pr`/`antipatterns` were
+/// persisted, falls back to a residual-score heuristic: score points not
+/// accounted for by the stored numeric fields are labelled as inferred violations.
 ///
 /// [`BounceLogEntry`]: crate::report::BounceLogEntry
 fn build_violation_reasons(entry: &crate::report::BounceLogEntry) -> String {
     let mut reasons: Vec<String> = Vec::new();
 
-    // Antipatterns first — each carries ×50 weight.
+    // ── Stored antipattern descriptions (×50 each) ─────────────────────────
     for ap in &entry.antipatterns {
         reasons.push(ap.clone());
     }
 
-    // Zombie symbol reintroduction — ×15 each.
+    // ── Zombie symbol reintroduction (×15 each) ────────────────────────────
     if entry.zombie_symbols_added > 0 {
         reasons.push(format!(
-            "Zombie Symbol Reintroduction (×{})",
+            "Zombie Symbol Reintroduction ×{}",
             entry.zombie_symbols_added
         ));
     }
 
-    // Dead symbol introduction — ×10 each.
+    // ── Dead symbol introduction (×10 each) ───────────────────────────────
     if entry.dead_symbols_added > 0 {
-        reasons.push(format!(
-            "Dead Symbol Added (×{})",
-            entry.dead_symbols_added
-        ));
+        reasons.push(format!("Dead Symbol Added ×{}", entry.dead_symbols_added));
     }
 
-    // Logic clones — ×5 each.
+    // ── Structural clones (×5 each) ────────────────────────────────────────
     if entry.logic_clones_found > 0 {
-        reasons.push(format!(
-            "Structural Clone (×{})",
-            entry.logic_clones_found
-        ));
+        reasons.push(format!("Structural Clone ×{}", entry.logic_clones_found));
     }
 
-    // Comment violations — ×5 each, include matched phrases.
-    if !entry.comment_violations.is_empty() {
-        reasons.push(format!(
-            "Comment Violation: {}",
-            entry.comment_violations.join(", ")
-        ));
+    // ── Comment violations (×5 each) ───────────────────────────────────────
+    for cv in &entry.comment_violations {
+        reasons.push(cv.clone());
     }
 
-    // Unlinked PR — ×20 flat penalty.
+    // ── Unlinked PR (×20 flat) ─────────────────────────────────────────────
     if entry.unlinked_pr > 0 {
         reasons.push("Unlinked PR".to_owned());
     }
 
-    // Zombie dependencies — informational (not score-bearing directly).
+    // ── Zombie dependencies (informational) ────────────────────────────────
     if !entry.zombie_deps.is_empty() {
-        reasons.push(format!(
-            "Zombie Dependency: {}",
-            entry.zombie_deps.join(", ")
-        ));
+        reasons.push(format!("Zombie Dependency: {}", entry.zombie_deps.join(", ")));
     }
 
-    reasons.join("; ")
+    // ── Legacy residual heuristic ──────────────────────────────────────────
+    // Log entries written before antipattern/unlinked_pr fields were persisted
+    // will have all of the above as zero/empty even when slop_score > 0.
+    // Compute what score is explained by known fields; label the gap.
+    if reasons.is_empty() && entry.slop_score > 0 {
+        let known: u32 = entry.dead_symbols_added * 10
+            + entry.logic_clones_found * 5
+            + entry.zombie_symbols_added * 15
+            + entry.unlinked_pr * 20
+            + entry.comment_violations.len() as u32 * 5;
+        let residual = entry.slop_score.saturating_sub(known);
+        if residual > 0 {
+            // Attempt to decompose the residual into known scoring units.
+            // Priority: antipatterns (50 pts) → unlinked (20 pts).
+            let mut rem = residual;
+            let inferred_antipatterns = rem / 50;
+            rem %= 50;
+            let inferred_unlinked = rem / 20;
+            rem %= 20;
+
+            if inferred_antipatterns > 0 {
+                reasons.push(format!(
+                    "Language Antipattern ×{inferred_antipatterns} [inferred from score]"
+                ));
+            }
+            if inferred_unlinked > 0 {
+                reasons.push("Unlinked PR [inferred from score]".to_owned());
+            }
+            if rem > 0 {
+                reasons.push(format!("Unknown violation (residual score: {rem})"));
+            }
+        }
+    }
+
+    reasons.join(" | ")
 }
