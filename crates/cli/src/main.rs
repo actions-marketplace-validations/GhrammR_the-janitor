@@ -2127,7 +2127,13 @@ fn cmd_bounce(
                 .map(|v| format!("[line {}] {}", v.line, v.phrase))
                 .collect();
             if let Some(body) = pr_body {
-                if scanner.is_pr_unlinked(body) {
+                // Unlinked-PR penalty — suppressed for authors that the repo
+                // maintainer has explicitly listed in janitor.toml under
+                // `trusted_bot_authors`.  The list is intentionally empty by
+                // default; no author is exempt unless the maintainer commits
+                // that handle to the governance manifest.
+                let author_is_trusted_bot = policy.is_trusted_bot(author.unwrap_or(""));
+                if scanner.is_pr_unlinked(body) && !author_is_trusted_bot {
                     score.unlinked_pr = 1;
                 }
                 // Hallucinated security fix check (patch mode — all +++ b/ headers).

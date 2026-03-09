@@ -103,6 +103,24 @@ pub struct JanitorPolicy {
     ///
     /// Default: `0` (no bonus).
     pub refactor_bonus: u32,
+
+    /// Automation account handles that are exempt from the unlinked-PR penalty.
+    ///
+    /// Entries are matched **case-insensitively** against the PR author.  Exact
+    /// handle string, no glob or regex.  Use this to suppress the
+    /// `unlinked_pr = 1` penalty for known, trusted automation accounts that
+    /// are unlikely to open companion issues (e.g. a project-local CI bot).
+    ///
+    /// **Deliberately empty by default** — maintainers must explicitly commit
+    /// each trusted automation handle.  The engine hardcodes nothing; if you
+    /// want `r-ryantm` or `dependabot[bot]` to be exempt, list them here.
+    ///
+    /// ```toml
+    /// trusted_bot_authors = ["r-ryantm", "dependabot[bot]", "renovate[bot]"]
+    /// ```
+    ///
+    /// Default: `[]` (no exemptions — all authors are investigated equally).
+    pub trusted_bot_authors: Vec<String>,
 }
 
 impl Default for JanitorPolicy {
@@ -114,6 +132,7 @@ impl Default for JanitorPolicy {
             pqc_enforced: false,
             custom_antipatterns: Vec::new(),
             refactor_bonus: 0,
+            trusted_bot_authors: Vec::new(),
         }
     }
 }
@@ -155,6 +174,23 @@ impl JanitorPolicy {
                 Self::default()
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Author trust
+    // -----------------------------------------------------------------------
+
+    /// Returns `true` when `author` appears in [`Self::trusted_bot_authors`].
+    ///
+    /// Matching is **case-insensitive** and exact (no globs, no prefix matching).
+    /// Returns `false` when `trusted_bot_authors` is empty — the default — so
+    /// that all authors are inspected equally unless the maintainer has
+    /// explicitly opted specific automation handles into the exemption list.
+    pub fn is_trusted_bot(&self, author: &str) -> bool {
+        let lower = author.to_ascii_lowercase();
+        self.trusted_bot_authors
+            .iter()
+            .any(|b| b.to_ascii_lowercase() == lower)
     }
 
     // -----------------------------------------------------------------------
@@ -247,10 +283,43 @@ mod tests {
             pqc_enforced: false,
             custom_antipatterns: vec!["tools/queries/no_global.scm".to_owned()],
             refactor_bonus: 25,
+            trusted_bot_authors: vec!["release-bot".to_owned()],
         };
         let serialised = toml::to_string(&original).unwrap();
         let deserialised: JanitorPolicy = toml::from_str(&serialised).unwrap();
         assert_eq!(original, deserialised);
+    }
+
+    #[test]
+    fn trusted_bot_empty_by_default() {
+        let p = JanitorPolicy::default();
+        assert!(p.trusted_bot_authors.is_empty());
+        // No author is exempt when the list is empty.
+        assert!(!p.is_trusted_bot("dependabot[bot]"));
+        assert!(!p.is_trusted_bot("r-ryantm"));
+        assert!(!p.is_trusted_bot(""));
+    }
+
+    #[test]
+    fn trusted_bot_exact_case_insensitive_match() {
+        let p = JanitorPolicy {
+            trusted_bot_authors: vec!["release-bot".to_owned(), "R-RyanTM".to_owned()],
+            ..Default::default()
+        };
+        assert!(p.is_trusted_bot("release-bot"));
+        assert!(p.is_trusted_bot("RELEASE-BOT")); // case-insensitive
+        assert!(p.is_trusted_bot("r-ryantm")); // mixed-case entry normalised
+        assert!(!p.is_trusted_bot("release")); // prefix match must not fire
+        assert!(!p.is_trusted_bot(""));
+    }
+
+    #[test]
+    fn trusted_bot_roundtrip_toml() {
+        let raw = "trusted_bot_authors = [\"release-bot\", \"ci-runner\"]\n";
+        let p: JanitorPolicy = toml::from_str(raw).unwrap();
+        assert_eq!(p.trusted_bot_authors, ["release-bot", "ci-runner"]);
+        assert!(p.is_trusted_bot("ci-runner"));
+        assert!(!p.is_trusted_bot("dependabot[bot]"));
     }
 
     #[test]

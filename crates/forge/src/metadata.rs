@@ -104,10 +104,15 @@ fn security_ac() -> &'static AhoCorasick {
 ///
 /// In NixOS/nixpkgs and similar package-collection repos a security fix for a
 /// CVE is *legitimately* implemented by bumping a version in a `.nix` derivation
-/// and updating the corresponding `flake.lock` or `packages.json`.  Treating
-/// those files as non-code produces a false-positive "Hallucinated Security Fix"
-/// for what is actually valid, human-reviewed patch work.
-const IAC_CODE_EXTENSIONS: &[&str] = &["nix", "lock", "json"];
+/// and updating the corresponding `flake.lock`, `packages.json`, or workspace
+/// `Cargo.toml`.  Treating those files as non-code produces a false-positive
+/// "Hallucinated Security Fix" for what is actually valid, human-reviewed patch
+/// work.
+///
+/// `.toml` is included because Nix-overlay repos and Rust package registries
+/// encode dependency versions in TOML manifests — a version bump there *is* the
+/// security fix.
+const IAC_CODE_EXTENSIONS: &[&str] = &["nix", "lock", "json", "toml"];
 
 /// Returns `true` when `repo_slug` looks like an IaC / package-collection
 /// repository that uses `.nix` / lockfiles as its primary source artefacts.
@@ -861,6 +866,29 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert!(
             detect_hallucinated_fix(body, &["lock".to_string()], "acme/myapp").is_some(),
             "lock-only in non-IaC repo → hallucinated"
+        );
+    }
+
+    #[test]
+    fn test_hallucinated_fix_nixpkgs_toml_not_flagged() {
+        // A Nix-overlay or Rust package-collection repo may resolve a CVE by
+        // bumping a version in a .toml manifest — this is a legitimate code
+        // change and must not be flagged as a hallucinated security fix.
+        let body = "Fixes CVE-2026-5555: bump rustls from 0.21 to 0.23 (RUSTSEC-2026-0001).";
+        let exts_toml = vec!["toml".to_string()];
+        let exts_mixed = vec!["nix".to_string(), "toml".to_string(), "lock".to_string()];
+        assert!(
+            detect_hallucinated_fix(body, &exts_toml, "NixOS/nixpkgs").is_none(),
+            ".toml-only bump in nixpkgs → legitimate IaC fix, must not flag"
+        );
+        assert!(
+            detect_hallucinated_fix(body, &exts_mixed, "NixOS/nixpkgs").is_none(),
+            "nix+toml+lock in nixpkgs → legitimate IaC fix, must not flag"
+        );
+        // In a non-IaC repo, a .toml-only change is still non-code.
+        assert!(
+            detect_hallucinated_fix(body, &exts_toml, "acme/myapp").is_some(),
+            ".toml-only in non-IaC repo → hallucinated"
         );
     }
 
