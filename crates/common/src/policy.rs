@@ -36,6 +36,39 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
+// ForgeConfig — [forge] sub-table
+// ---------------------------------------------------------------------------
+
+/// Engine-level configuration nested under `[forge]` in `janitor.toml`.
+///
+/// These settings control the slop-detection engine's behaviour independently
+/// of the governance gate thresholds that live at the top level of the manifest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ForgeConfig {
+    /// Ecosystem-specific automation account handles that are exempt from the
+    /// **unlinked-PR penalty only**.
+    ///
+    /// Use this field for accounts that lack the standard GitHub `[bot]` suffix
+    /// but are verified, non-human contributors — e.g. `r-ryantm` (NixOS package
+    /// updater) or `app/nixpkgs-ci`.  These accounts do not open companion GitHub
+    /// Issues for their PRs by design; penalising them with `unlinked_pr × 20`
+    /// systematically inflates slop scores and destroys ROI signal.
+    ///
+    /// **Full slop analysis still executes.** Only the issue-link check is
+    /// bypassed.  Dead symbols, logic clones, and antipatterns are still scored.
+    ///
+    /// Matched **case-insensitively** against the PR author.  Exact handle, no
+    /// glob or regex.
+    ///
+    /// ```toml
+    /// [forge]
+    /// automation_accounts = ["r-ryantm", "app/nixpkgs-ci"]
+    /// ```
+    pub automation_accounts: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // JanitorPolicy
 // ---------------------------------------------------------------------------
 
@@ -121,6 +154,12 @@ pub struct JanitorPolicy {
     ///
     /// Default: `[]` (no exemptions — all authors are investigated equally).
     pub trusted_bot_authors: Vec<String>,
+
+    /// Engine-level settings nested under `[forge]`.
+    ///
+    /// See [`ForgeConfig`] for available fields.  Defaults to an empty
+    /// configuration when the `[forge]` section is absent from `janitor.toml`.
+    pub forge: ForgeConfig,
 }
 
 impl Default for JanitorPolicy {
@@ -133,6 +172,7 @@ impl Default for JanitorPolicy {
             custom_antipatterns: Vec::new(),
             refactor_bonus: 0,
             trusted_bot_authors: Vec::new(),
+            forge: ForgeConfig::default(),
         }
     }
 }
@@ -177,20 +217,52 @@ impl JanitorPolicy {
     }
 
     // -----------------------------------------------------------------------
-    // Author trust
+    // Automation account detection
     // -----------------------------------------------------------------------
+
+    /// Returns `true` when `author` is a recognized automation account.
+    ///
+    /// Three detection layers, evaluated in order — all zero-allocation in the
+    /// hot path (no `String` clones):
+    ///
+    /// 1. **GitHub App suffix** — any author ending with `[bot]` is
+    ///    unconditionally recognized (Dependabot, Renovate, GitHub Actions apps,
+    ///    etc.).  No configuration required.
+    ///
+    /// 2. **`trusted_bot_authors`** — handles listed at the top level of
+    ///    `janitor.toml`.  Backwards-compatible with existing manifests.
+    ///
+    /// 3. **`[forge].automation_accounts`** — handles listed in the `[forge]`
+    ///    sub-section of `janitor.toml`.  Designed for ecosystem accounts that
+    ///    lack the `[bot]` suffix (e.g. `r-ryantm`, `app/nixpkgs-ci`).
+    ///
+    /// Matching is **case-insensitive** and exact (no globs, no prefix matching).
+    ///
+    /// When all lists are empty (the default), only the `[bot]` suffix rule
+    /// fires — no author is unconditionally exempted by configuration alone.
+    pub fn is_automation_account(&self, author: &str) -> bool {
+        // Layer 1: standard GitHub App suffix — zero-allocation static check.
+        if author.ends_with("[bot]") {
+            return true;
+        }
+        // Layer 2 & 3: config-defined lists — `eq_ignore_ascii_case` is
+        // zero-allocation (byte-level comparison, no String allocation).
+        self.trusted_bot_authors
+            .iter()
+            .any(|b| b.eq_ignore_ascii_case(author))
+            || self
+                .forge
+                .automation_accounts
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(author))
+    }
 
     /// Returns `true` when `author` appears in [`Self::trusted_bot_authors`].
     ///
-    /// Matching is **case-insensitive** and exact (no globs, no prefix matching).
-    /// Returns `false` when `trusted_bot_authors` is empty — the default — so
-    /// that all authors are inspected equally unless the maintainer has
-    /// explicitly opted specific automation handles into the exemption list.
+    /// Delegates to [`Self::is_automation_account`], which additionally
+    /// checks the standard GitHub `[bot]` suffix and `[forge].automation_accounts`.
     pub fn is_trusted_bot(&self, author: &str) -> bool {
-        let lower = author.to_ascii_lowercase();
-        self.trusted_bot_authors
-            .iter()
-            .any(|b| b.to_ascii_lowercase() == lower)
+        self.is_automation_account(author)
     }
 
     // -----------------------------------------------------------------------
@@ -284,6 +356,7 @@ mod tests {
             custom_antipatterns: vec!["tools/queries/no_global.scm".to_owned()],
             refactor_bonus: 25,
             trusted_bot_authors: vec!["release-bot".to_owned()],
+            forge: ForgeConfig::default(),
         };
         let serialised = toml::to_string(&original).unwrap();
         let deserialised: JanitorPolicy = toml::from_str(&serialised).unwrap();
@@ -294,8 +367,9 @@ mod tests {
     fn trusted_bot_empty_by_default() {
         let p = JanitorPolicy::default();
         assert!(p.trusted_bot_authors.is_empty());
-        // No author is exempt when the list is empty.
-        assert!(!p.is_trusted_bot("dependabot[bot]"));
+        // With empty lists, [bot]-suffix authors ARE detected (layer 1 — no config required).
+        assert!(p.is_trusted_bot("dependabot[bot]"));
+        // Non-[bot] authors with no config entry must NOT be exempt.
         assert!(!p.is_trusted_bot("r-ryantm"));
         assert!(!p.is_trusted_bot(""));
     }
@@ -319,7 +393,73 @@ mod tests {
         let p: JanitorPolicy = toml::from_str(raw).unwrap();
         assert_eq!(p.trusted_bot_authors, ["release-bot", "ci-runner"]);
         assert!(p.is_trusted_bot("ci-runner"));
-        assert!(!p.is_trusted_bot("dependabot[bot]"));
+        // [bot]-suffix authors are detected via layer-1 even when not in trusted_bot_authors.
+        assert!(p.is_trusted_bot("dependabot[bot]"));
+    }
+
+    // --- Automation shield ---
+
+    #[test]
+    fn bot_suffix_detected_without_config() {
+        // Any author ending with "[bot]" is recognised automatically — no
+        // trusted_bot_authors or automation_accounts entry required.
+        let p = JanitorPolicy::default();
+        assert!(p.is_automation_account("dependabot[bot]"));
+        assert!(p.is_automation_account("renovate[bot]"));
+        assert!(p.is_automation_account("github-actions[bot]"));
+        assert!(p.is_automation_account("app/nixpkgs-ci[bot]"));
+    }
+
+    #[test]
+    fn non_bot_suffix_not_detected_without_config() {
+        // Accounts without [bot] suffix and not in any config list must NOT fire.
+        let p = JanitorPolicy::default();
+        assert!(!p.is_automation_account("r-ryantm"));
+        assert!(!p.is_automation_account("app/nixpkgs-ci"));
+        assert!(!p.is_automation_account(""));
+    }
+
+    #[test]
+    fn forge_automation_accounts_detected() {
+        let p = JanitorPolicy {
+            forge: ForgeConfig {
+                automation_accounts: vec!["r-ryantm".to_owned(), "app/nixpkgs-ci".to_owned()],
+            },
+            ..Default::default()
+        };
+        assert!(p.is_automation_account("r-ryantm"));
+        assert!(p.is_automation_account("R-RyanTM")); // case-insensitive
+        assert!(p.is_automation_account("app/nixpkgs-ci"));
+        assert!(!p.is_automation_account("some-human"));
+    }
+
+    #[test]
+    fn forge_automation_accounts_roundtrip_toml() {
+        let raw = "[forge]\nautomation_accounts = [\"r-ryantm\", \"app/nixpkgs-ci\"]\n";
+        let p: JanitorPolicy = toml::from_str(raw).unwrap();
+        assert_eq!(p.forge.automation_accounts, ["r-ryantm", "app/nixpkgs-ci"]);
+        assert!(p.is_automation_account("r-ryantm"));
+        assert!(p.is_automation_account("app/nixpkgs-ci"));
+        assert!(!p.is_automation_account("human-author"));
+    }
+
+    #[test]
+    fn is_trusted_bot_delegates_to_is_automation_account() {
+        // is_trusted_bot() is a backwards-compat alias — must match is_automation_account().
+        let p = JanitorPolicy {
+            forge: ForgeConfig {
+                automation_accounts: vec!["r-ryantm".to_owned()],
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            p.is_trusted_bot("r-ryantm"),
+            p.is_automation_account("r-ryantm")
+        );
+        assert_eq!(
+            p.is_trusted_bot("dependabot[bot]"),
+            p.is_automation_account("dependabot[bot]")
+        );
     }
 
     #[test]

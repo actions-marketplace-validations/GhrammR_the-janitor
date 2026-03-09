@@ -128,10 +128,32 @@ pub fn compute_simhash(node: Node<'_>, source: &[u8]) -> u64 {
 // Internal constants & helpers
 // ---------------------------------------------------------------------------
 
-/// Node kinds carrying only naming information — excluded from SimHash.
+/// Node kinds excluded from SimHash fingerprinting.
 ///
 /// Must stay in sync with `SKIP_KINDS` in `lib.rs`.
+///
+/// ## Version-bump bypass
+///
+/// Numeric and string literal nodes are excluded so that automated dependency
+/// bumps — which change only version number literals (`"1.2.3"` → `"1.2.4"`,
+/// `0x1A` → `0x1B`) — do not shift the structural fingerprint.  Two function
+/// bodies that differ **only** in literal values produce identical SimHash
+/// fingerprints and are correctly classified as [`Similarity::Refactor`]
+/// rather than [`Similarity::Zombie`], preventing the ×5 near-clone penalty
+/// from firing on ecosystem automation PRs (`r-ryantm`, Dependabot, Renovate).
+///
+/// Literal kind names are grammar-specific; we cover all supported grammars:
+///
+/// | Grammar | Integer kind | Float kind |
+/// |---------|-------------|------------|
+/// | Python  | `integer`   | `float`    |
+/// | Rust    | `integer_literal` | `float_literal` |
+/// | Go      | `int_literal` | `float_literal`, `imaginary_literal` |
+/// | JS/TS   | `number`    | —          |
+/// | C/C++   | `number_literal` | —     |
+/// | Java    | `decimal_integer_literal` | `decimal_floating_point_literal` |
 const SIM_SKIP_KINDS: &[&str] = &[
+    // Naming nodes (original set)
     "identifier",
     "string",
     "string_content",
@@ -140,6 +162,20 @@ const SIM_SKIP_KINDS: &[&str] = &[
     "escape_sequence",
     "comment",
     "type_comment",
+    // Numeric literal nodes — version-bump bypass
+    "integer",
+    "float",
+    "integer_literal",
+    "float_literal",
+    "int_literal",
+    "imaginary_literal",
+    "number",
+    "number_literal",
+    "decimal_integer_literal",
+    "decimal_floating_point_literal",
+    "hex_literal",
+    "octal_literal",
+    "binary_literal",
 ];
 
 /// Recursively collect SimHash features from the AST.

@@ -2136,13 +2136,14 @@ fn cmd_bounce(
                 .map(|v| format!("[line {}] {}", v.line, v.phrase))
                 .collect();
             if let Some(body) = pr_body {
-                // Unlinked-PR penalty — suppressed for authors that the repo
-                // maintainer has explicitly listed in janitor.toml under
-                // `trusted_bot_authors`.  The list is intentionally empty by
-                // default; no author is exempt unless the maintainer commits
-                // that handle to the governance manifest.
-                let author_is_trusted_bot = policy.is_trusted_bot(author.unwrap_or(""));
-                if scanner.is_pr_unlinked(body) && !author_is_trusted_bot {
+                // Unlinked-PR penalty — suppressed for automation accounts.
+                // Detection layers (zero-allocation, evaluated in order):
+                //   1. Standard GitHub [bot] suffix (Dependabot, Renovate, etc.)
+                //   2. `trusted_bot_authors` list in janitor.toml
+                //   3. `[forge].automation_accounts` list in janitor.toml
+                //      (for ecosystem accounts like r-ryantm, app/nixpkgs-ci)
+                let author_is_automation = policy.is_automation_account(author.unwrap_or(""));
+                if scanner.is_pr_unlinked(body) && !author_is_automation {
                     score.unlinked_pr = 1;
                 }
                 // Hallucinated security fix check (patch mode — all +++ b/ headers).
@@ -2261,7 +2262,7 @@ fn cmd_bounce(
     let pr_state = pr_state_str
         .parse::<report::PrState>()
         .unwrap_or(report::PrState::Open);
-    let is_bot = policy.is_trusted_bot(author.unwrap_or(""));
+    let is_bot = policy.is_automation_account(author.unwrap_or(""));
     let log_entry = report::BounceLogEntry {
         pr_number,
         author: author.map(|s| s.to_owned()),
