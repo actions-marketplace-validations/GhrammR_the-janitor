@@ -188,6 +188,12 @@ enum Commands {
         /// so no extra flag is needed inside GitHub Actions.
         #[arg(long)]
         repo_slug: Option<String>,
+        /// GitHub PR lifecycle state: `open` (default), `merged`, or `closed`.
+        ///
+        /// Stored in the bounce log for downstream CSV segmentation.  Use `merged`
+        /// or `closed` to classify historical entries as non-actionable in reports.
+        #[arg(long, default_value = "open")]
+        pr_state: String,
     },
     /// Launch the Ratatui TUI dashboard from a saved symbol registry.
     Dashboard {
@@ -445,6 +451,7 @@ async fn main() -> anyhow::Result<()> {
             author,
             pr_body,
             repo_slug,
+            pr_state,
         } => cmd_bounce(
             path,
             patch.as_deref(),
@@ -457,6 +464,7 @@ async fn main() -> anyhow::Result<()> {
             author.as_deref(),
             pr_body.as_deref(),
             repo_slug.as_deref(),
+            pr_state.as_str(),
         )?,
         Commands::Report {
             repo,
@@ -1991,6 +1999,7 @@ fn cmd_bounce(
     author: Option<&str>,
     pr_body: Option<&str>,
     repo_slug: Option<&str>,
+    pr_state_str: &str,
 ) -> anyhow::Result<()> {
     use common::policy::JanitorPolicy;
     use common::registry::{MappedRegistry, SymbolRegistry};
@@ -2249,6 +2258,10 @@ fn cmd_bounce(
     // PR-scoped zombie dep scan — O(PR-diff bytes), no full-tree WalkDir.
     let zombie_deps = anatomist::manifest::find_zombie_deps_in_blobs(&bounce_blobs);
     let janitor_dir = project_root.join(".janitor");
+    let pr_state = pr_state_str
+        .parse::<report::PrState>()
+        .unwrap_or(report::PrState::Open);
+    let is_bot = policy.is_trusted_bot(author.unwrap_or(""));
     let log_entry = report::BounceLogEntry {
         pr_number,
         author: author.map(|s| s.to_owned()),
@@ -2262,6 +2275,12 @@ fn cmd_bounce(
         comment_violations: score.comment_violation_details,
         min_hashes: min_hashes_vec,
         zombie_deps,
+        state: pr_state,
+        is_bot,
+        repo_slug: repo_slug
+            .map(|s| s.to_owned())
+            .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
+            .unwrap_or_default(),
     };
     report::append_bounce_log(&janitor_dir, &log_entry);
 

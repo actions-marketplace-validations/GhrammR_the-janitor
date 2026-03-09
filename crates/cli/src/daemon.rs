@@ -380,6 +380,9 @@ pub mod unix {
                             comment_violations: score.comment_violation_details,
                             min_hashes: sig.min_hashes.to_vec(),
                             zombie_deps: Vec::new(),
+                            state: crate::report::PrState::Open,
+                            is_bot: false,
+                            repo_slug: String::new(),
                         };
                         crate::report::append_bounce_log(&state.janitor_dir, &log_entry);
 

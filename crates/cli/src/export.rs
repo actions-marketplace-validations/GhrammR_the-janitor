@@ -6,7 +6,7 @@
 //! Static-scan fallback: when no bounce log exists, loads `.janitor/symbols.rkyv`
 //! and emits one CSV row per dead symbol (PR-specific columns left empty).
 //!
-//! ## Columns (14 total)
+//! ## Columns (17 total)
 //!
 //! | # | Column | Notes |
 //! |---|--------|-------|
@@ -24,6 +24,9 @@
 //! | 12 | `Time_Saved_Hours` | 0.2 h per actionable intercept |
 //! | 13 | `Operational_Savings_USD` | Time × $100/hr loaded engineering cost |
 //! | 14 | `Timestamp` | ISO 8601 UTC |
+//! | 15 | `PR_State` | `open`, `merged`, or `closed` |
+//! | 16 | `Is_Bot` | `TRUE` when author is in `trusted_bot_authors` (janitor.toml) |
+//! | 17 | `Repo_Slug` | GitHub `owner/repo` slug |
 
 use anyhow::Result;
 use std::path::Path;
@@ -48,7 +51,7 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
     const MINUTES_PER_TRIAGE: f64 = 12.0;
     const HOURLY_COST_USD: f64 = 100.0;
 
-    // Exact 14-column header schema.
+    // Exact 17-column header schema.
     wtr.write_record([
         "PR_Number",
         "Author",
@@ -64,6 +67,9 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         "Time_Saved_Hours",
         "Operational_Savings_USD",
         "Timestamp",
+        "PR_State",
+        "Is_Bot",
+        "Repo_Slug",
     ])?;
 
     for entry in &entries {
@@ -92,6 +98,8 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         let violation_reasons = build_violation_reasons(entry);
         let time_str = format!("{time_saved_h:.4}");
         let savings_str = format!("{savings_usd:.2}");
+        let state_str = entry.state.to_string();
+        let is_bot_str = if entry.is_bot { "TRUE" } else { "FALSE" };
 
         wtr.write_record([
             pr_num_str.as_str(),
@@ -108,6 +116,9 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
             time_str.as_str(),
             savings_str.as_str(),
             entry.timestamp.as_str(),
+            state_str.as_str(),
+            is_bot_str,
+            entry.repo_slug.as_str(),
         ])?;
     }
 
@@ -176,6 +187,9 @@ fn export_static_scan(janitor_dir: &Path, out: &Path) -> Result<()> {
         "Time_Saved_Hours",
         "Operational_Savings_USD",
         "Timestamp",
+        "PR_State",
+        "Is_Bot",
+        "Repo_Slug",
     ])?;
 
     let timestamp = crate::utc_now_iso8601();
@@ -205,6 +219,9 @@ fn export_static_scan(janitor_dir: &Path, out: &Path) -> Result<()> {
             "0.0000", // Time_Saved_Hours
             "0.00",   // Operational_Savings_USD
             timestamp.as_str(),
+            "open",  // PR_State — N/A for static scan
+            "FALSE", // Is_Bot — N/A for static scan
+            "",      // Repo_Slug — N/A for static scan
         ])?;
     }
 

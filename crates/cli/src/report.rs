@@ -33,6 +33,52 @@ pub const MINUTES_PER_TRIAGE: f64 = 12.0;
 const HOURLY_COST_USD: f64 = 100.0;
 
 // ---------------------------------------------------------------------------
+// PrState
+// ---------------------------------------------------------------------------
+
+/// GitHub PR lifecycle state at the time of the bounce audit.
+///
+/// Passed via `--pr-state` on the CLI.  Defaults to [`PrState::Open`] when
+/// omitted — the most conservative assumption (the patch is still candidate
+/// for merge).  Use `Merged` or `Closed` to classify historical entries in the
+/// CSV export as non-actionable for pipeline purposes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PrState {
+    /// PR is open and can still be merged (default).
+    #[default]
+    Open,
+    /// PR has been merged into the target branch.
+    Merged,
+    /// PR was closed without merging.
+    Closed,
+}
+
+impl std::fmt::Display for PrState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrState::Open => f.write_str("Open"),
+            PrState::Merged => f.write_str("Merged"),
+            PrState::Closed => f.write_str("Closed"),
+        }
+    }
+}
+
+impl std::str::FromStr for PrState {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "open" => Ok(PrState::Open),
+            "merged" => Ok(PrState::Merged),
+            "closed" => Ok(PrState::Closed),
+            other => Err(format!(
+                "unknown PR state '{other}'; expected open|merged|closed"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BounceLogEntry
 // ---------------------------------------------------------------------------
 
@@ -89,6 +135,25 @@ pub struct BounceLogEntry {
     /// `requirements.txt`) but whose name was not found in any source file.
     #[serde(default)]
     pub zombie_deps: Vec<String>,
+    /// GitHub PR lifecycle state (`open`, `merged`, `closed`).
+    ///
+    /// Supplied via `--pr-state`; defaults to `open`.  Enables downstream
+    /// segmentation of Active Threats (open) from Historical Anomalies (merged/closed).
+    #[serde(default)]
+    pub state: PrState,
+    /// `true` when the PR author is listed in the governance manifest's
+    /// `trusted_bot_authors` array (`janitor.toml`).
+    ///
+    /// Derived from [`common::policy::JanitorPolicy::is_trusted_bot`] at bounce
+    /// time.  Always `false` when no governance manifest is present.
+    #[serde(default)]
+    pub is_bot: bool,
+    /// GitHub repository slug (`owner/repo`) identifying the target repository.
+    ///
+    /// Populated from `--repo-slug` or the `GITHUB_REPOSITORY` environment
+    /// variable.  Empty string when neither is available.
+    #[serde(default)]
+    pub repo_slug: String,
 }
 
 // ---------------------------------------------------------------------------
