@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/*", "tools/wisdom-bake", "tools/mint-token"]
+members = ["crates/*", "tools/wisdom-bake", "tools/mint-token", "tools/parallel-bounce"]
 resolver = "2"
 
 [workspace.package]
-version = "6.11.5"
+version = "6.11.6"
 edition = "2021"
 repository = "https://github.com/GhrammR/the-janitor"
 license = "BUSL-1.1"

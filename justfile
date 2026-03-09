@@ -99,7 +99,49 @@ release version: audit (bump-version version)
 	uv run --with "mkdocs-material<9.6" --with "mkdocs<2" mkdocs gh-deploy --force
 	@echo "💀 Release v{{version}} deployed."
 
-# 5. DOCUMENTATION
+# 5. PARALLEL AUDIT
+# Bounce PRs from a cached JSON list using the 2-worker Rust-native parallel
+# engine.  The RAM gate (2-thread rayon pool) caps peak RSS at ~500 MB.
+# The git lock serialises gh pr diff fetches to prevent fd exhaustion.
+#
+# Usage:
+#   just parallel-audit NixOS/nixpkgs                          # first 50 PRs
+#   just parallel-audit NixOS/nixpkgs 200                      # first 200 PRs
+#   just parallel-audit godotengine/godot 5000 60              # all, 60s timeout
+#
+# REPO_SLUG  — GitHub owner/repo
+# LIMIT      — max PRs to process  (default: 50)
+# TIMEOUT    — seconds per bounce  (default: 30)
+parallel-audit REPO_SLUG LIMIT="50" TIMEOUT="30":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	REPO_NAME="${REPO_SLUG##*/}"
+	GAUNTLET_DIR="${GAUNTLET_DIR:-$HOME/dev/gauntlet}"
+	REPO_DIR="$GAUNTLET_DIR/$REPO_NAME"
+	CACHE="$HOME/.janitor/pkg_cache_${REPO_NAME}.json"
+	JANITOR="${JANITOR:-$(pwd)/target/release/janitor}"
+	PBOUNCE="$(pwd)/target/release/parallel-bounce"
+
+	if [[ ! -f "$CACHE" ]]; then
+	    echo "Cache not found: $CACHE"
+	    echo "Run generate_client_package.sh first to populate the PR cache."
+	    exit 1
+	fi
+	if [[ ! -x "$PBOUNCE" ]]; then
+	    echo "parallel-bounce not built — run: cargo build --release -p parallel-bounce"
+	    exit 1
+	fi
+	if [[ ! -x "$JANITOR" ]]; then
+	    echo "janitor not built — run: just build"
+	    exit 1
+	fi
+
+	echo "==> parallel-audit  repo={{REPO_SLUG}}  limit={{LIMIT}}  timeout={{TIMEOUT}}s"
+	"$PBOUNCE" "$CACHE" "$REPO_DIR" "$JANITOR" "{{REPO_SLUG}}" \
+	    --limit   "{{LIMIT}}"   \
+	    --timeout "{{TIMEOUT}}"
+
+# 6. DOCUMENTATION
 deploy-docs:
 	uv run --with "mkdocs-material<9.6" --with "mkdocs<2" mkdocs gh-deploy --force
 
