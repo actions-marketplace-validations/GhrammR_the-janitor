@@ -114,6 +114,24 @@ fn security_ac() -> &'static AhoCorasick {
 /// security fix.
 const IAC_CODE_EXTENSIONS: &[&str] = &["nix", "lock", "json", "toml"];
 
+/// Extensions that constitute a complete, bypass-eligible IaC changeset.
+///
+/// When a repo is identified as an IaC / package-collection repository **and**
+/// every changed file has an extension from this set, [`detect_hallucinated_fix`]
+/// returns `None` immediately without evaluating the PR body for security keywords.
+///
+/// This is a hard bypass — not a reclassification.  It fires before the keyword
+/// scan so that no false-positive description is ever composed.
+///
+/// Rationale per extension:
+/// - `.nix`  — Nix derivations: bumping `src.hash` IS the CVE patch
+/// - `.json` — `packages.json`, `chromium/default.nix` (JSON-encoded manifests)
+/// - `.toml` — `Cargo.toml`, `pyproject.toml` version pins
+/// - `.lock` — `flake.lock`, `Cargo.lock`, `yarn.lock`
+/// - `.csv`  — package metadata tables used by some overlay generators
+/// - `.yaml` / `.yml` — GitHub Actions Dependabot bumps, Helm chart version pins
+const IAC_BYPASS_EXTENSIONS: &[&str] = &["nix", "json", "toml", "lock", "csv", "yaml", "yml"];
+
 /// Returns `true` when `repo_slug` looks like an IaC / package-collection
 /// repository that uses `.nix` / lockfiles as its primary source artefacts.
 fn is_iac_repo(repo_slug: &str) -> bool {
@@ -175,6 +193,28 @@ pub fn detect_hallucinated_fix(
     // Guard: nothing to flag on an empty body or empty changeset.
     if body.is_empty() || file_extensions.is_empty() {
         return None;
+    }
+
+    // IaC hard bypass — fires before the keyword scan.
+    //
+    // Package-collection repositories (NixOS/nixpkgs, package overlays, etc.)
+    // resolve CVEs by bumping version hashes or metadata in infrastructure
+    // files such as `.nix`, `.json`, `.lock`, or `.toml`.  That metadata bump
+    // *is* the security fix — there is no accompanying C/Rust/Python logic
+    // change, and that is by design.  Emitting "Unverified Security Bump" for
+    // these PRs would be a systematic false positive on an entire class of
+    // legitimate, reviewed engineering work.
+    //
+    // When the repo is identified as IaC AND every changed file extension
+    // belongs to [`IAC_BYPASS_EXTENSIONS`], return `None` unconditionally —
+    // do not evaluate keywords, do not compose a description, do not emit.
+    if is_iac_repo(repo_slug) {
+        let all_iac_safe = file_extensions
+            .iter()
+            .all(|ext| IAC_BYPASS_EXTENSIONS.contains(&ext.trim_start_matches('.')));
+        if all_iac_safe {
+            return None;
+        }
     }
 
     // Locate the first security keyword in the PR body.
@@ -866,6 +906,40 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert!(
             detect_hallucinated_fix(body, &["lock".to_string()], "acme/myapp").is_some(),
             "lock-only in non-IaC repo → hallucinated"
+        );
+    }
+
+    #[test]
+    fn test_iac_bypass_json_only_nixpkgs_cve_not_flagged() {
+        // Regression test for the v6.11.2 false positive:
+        // Chromium and Terraform CVE version bumps in NixOS/nixpkgs touched ONLY
+        // `.json` files (packages.json / chromium/default.nix JSON blocks).
+        // The engine was emitting "Unverified Security Bump: only non-code files
+        // changed: json" because --repo-slug was not being passed from the script
+        // and the IaC bypass did not fire.
+        //
+        // This test exercises the hard bypass path directly: is_iac_repo fires,
+        // all extensions are in IAC_BYPASS_EXTENSIONS, None is returned before
+        // any keyword evaluation.
+        let body =
+            "chromium: 125.0.6422.60 -> 125.0.6422.76\n\nFixes CVE-2024-4947, CVE-2024-4948.";
+        let json_only = vec!["json".to_string()];
+        assert!(
+            detect_hallucinated_fix(body, &json_only, "NixOS/nixpkgs").is_none(),
+            ".json-only CVE bump in NixOS/nixpkgs must NOT be flagged (IaC hard bypass)"
+        );
+
+        // Multi-extension IaC changesets must also pass.
+        let mixed = vec!["nix".to_string(), "json".to_string(), "lock".to_string()];
+        assert!(
+            detect_hallucinated_fix(body, &mixed, "NixOS/nixpkgs").is_none(),
+            "nix+json+lock in NixOS/nixpkgs must NOT be flagged"
+        );
+
+        // The same body in a non-IaC repo must still be flagged.
+        assert!(
+            detect_hallucinated_fix(body, &json_only, "acme/webapp").is_some(),
+            ".json-only CVE claim in a non-IaC repo must still be flagged"
         );
     }
 

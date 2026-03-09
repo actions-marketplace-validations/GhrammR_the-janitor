@@ -150,7 +150,8 @@ if [[ ! -f "$CACHE_FILE" ]]; then
     info "Cached $CACHED PRs → $CACHE_FILE"
 else
     CACHED=$(jq 'length' "$CACHE_FILE")
-    info "Using cached PR list: $CACHED PRs  (rm $CACHE_FILE to refresh)"
+    info "Using cached PR list: $CACHED PRs"
+    info "  Refresh cache : rm $CACHE_FILE"
 fi
 
 TOTAL=$(jq 'length' "$CACHE_FILE")
@@ -213,6 +214,8 @@ PYEOF
     ALREADY=${#DONE_PRS[@]}
     if [[ $ALREADY -gt 0 ]]; then
         info "Resuming: $ALREADY / $TOTAL PRs already processed — skipping them."
+        info "  Reset progress: rm $PROGRESS_FILE"
+        info "  Full reset    : rm $PROGRESS_FILE $CACHE_FILE"
         echo ""
     fi
 fi
@@ -267,6 +270,7 @@ while IFS= read -r PR; do
         --pr-number "$NUMBER"     \
         --author    "$AUTHOR"     \
         --pr-body   "$BODY"       \
+        --repo-slug "$REPO_SLUG"  \
         --format    json          \
         2>"$BOUNCE_STDERR") && EXIT_CODE=0 || EXIT_CODE=$?
     set +x
