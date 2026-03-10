@@ -29,7 +29,25 @@
 //! | 17 | `Repo_Slug` | GitHub `owner/repo` slug |
 
 use anyhow::Result;
+use std::io::Write as _;
 use std::path::Path;
+
+/// UTF-8 Byte Order Mark — prepended to every CSV file so that Microsoft Excel
+/// and other enterprise spreadsheet tools auto-detect UTF-8 encoding rather than
+/// falling back to the system code page (which renders em-dashes and similar
+/// multi-byte characters as `â€"` or similar mojibake).
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// Open `path` for writing, write the UTF-8 BOM, and return a `csv::Writer`
+/// wrapping the file.  Returns an `anyhow::Error` on any I/O failure.
+fn bom_csv_writer(path: &Path) -> Result<csv::Writer<std::io::BufWriter<std::fs::File>>> {
+    let file = std::fs::File::create(path)
+        .map_err(|e| anyhow::anyhow!("Cannot create CSV file {}: {}", path.display(), e))?;
+    let mut buf = std::io::BufWriter::new(file);
+    buf.write_all(UTF8_BOM)
+        .map_err(|e| anyhow::anyhow!("Writing UTF-8 BOM to {}: {}", path.display(), e))?;
+    Ok(csv::Writer::from_writer(buf))
+}
 
 /// Export all bounce logs found under `gauntlet_root` to a single aggregate CSV file.
 ///
@@ -59,8 +77,7 @@ pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
         out.display()
     );
 
-    let mut wtr = csv::Writer::from_path(out)
-        .map_err(|e| anyhow::anyhow!("Cannot create CSV file {}: {}", out.display(), e))?;
+    let mut wtr = bom_csv_writer(out)?;
 
     wtr.write_record([
         "PR_Number",
@@ -157,8 +174,7 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         return export_static_scan(&janitor_dir, out);
     }
 
-    let mut wtr = csv::Writer::from_path(out)
-        .map_err(|e| anyhow::anyhow!("Cannot create CSV file {}: {}", out.display(), e))?;
+    let mut wtr = bom_csv_writer(out)?;
 
     // ROI constants — mirror report.rs values.
     const MINUTES_PER_TRIAGE: f64 = 12.0;
@@ -282,8 +298,7 @@ fn export_static_scan(janitor_dir: &Path, out: &Path) -> Result<()> {
             .cmp(&a.end_byte.saturating_sub(a.start_byte))
     });
 
-    let mut wtr = csv::Writer::from_path(out)
-        .map_err(|e| anyhow::anyhow!("Cannot create CSV file {}: {}", out.display(), e))?;
+    let mut wtr = bom_csv_writer(out)?;
 
     wtr.write_record([
         "PR_Number",

@@ -112,7 +112,18 @@ pub fn classify_similarity(similarity: f64) -> Similarity {
 /// Alpha-normalisation applies: `identifier`, `string`, and `comment` nodes
 /// are skipped to ensure that variable renaming does not shift the fingerprint.
 /// The same skip list is used in [`compute_structural_hash`][crate::compute_structural_hash].
+/// Minimum descendant AST node count below which a function is considered
+/// trivial (getter, delegate, one-liner adapter) and excluded from clone
+/// detection.  Trivial nodes receive a per-position unique hash so they never
+/// match each other — no heap allocation required.
+const TRIVIAL_NODE_THRESHOLD: usize = 7;
+
 pub fn compute_simhash(node: Node<'_>, source: &[u8]) -> u64 {
+    // Bypass clone detection for trivial nodes (getters, delegates, one-liners).
+    // Return a per-position unique hash so these never match each other.
+    if node.descendant_count() < TRIVIAL_NODE_THRESHOLD {
+        return (node.start_byte() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
     let mut counters = [0i32; 64];
     collect_features(node, source, 0, &mut counters);
     let mut fingerprint = 0u64;

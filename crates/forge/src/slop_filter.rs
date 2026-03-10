@@ -307,8 +307,9 @@ impl PRBouncer for PatchBouncer {
                 // Running the entropy classifier on them produces systematic false
                 // positives (e.g. every r-ryantm NixOS version-bump PR fires as
                 // AnomalousBlob because nix sha256 hash strings have ~6 bits/char).
-                const IAC_TEXT_EXTS: &[&str] =
-                    &["nix", "lock", "json", "toml", "yaml", "yml", "csv"];
+                const IAC_TEXT_EXTS: &[&str] = &[
+                    "nix", "lock", "json", "toml", "yaml", "yml", "csv", "md", "rst", "xml",
+                ];
                 if IAC_TEXT_EXTS.contains(&ext) {
                     return Ok(SlopScore::default());
                 }
