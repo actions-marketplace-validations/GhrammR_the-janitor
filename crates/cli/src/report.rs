@@ -1158,6 +1158,8 @@ pub fn render_global_markdown(data: &GlobalReportData, _gauntlet_root: &str) -> 
         out.push_str("\n\\newpage\n\n");
         out.push_str(&format!("## {}\n\n", repo.repo_name));
 
+        let repo_hours = repo.reclaimed_minutes / 60.0;
+        let repo_savings = repo_hours * HOURLY_COST_USD;
         out.push_str("| Metric | Value |\n");
         out.push_str("|--------|-------|\n");
         out.push_str(&format!("| PRs Analyzed | {} |\n", repo.pr_count));
@@ -1165,6 +1167,8 @@ pub fn render_global_markdown(data: &GlobalReportData, _gauntlet_root: &str) -> 
             "| Total Slop Score | {} |\n",
             repo.total_slop_score
         ));
+        out.push_str(&format!("| Time Reclaimed | {repo_hours:.1} hours |\n"));
+        out.push_str(&format!("| Operational Savings | ${repo_savings:.0} |\n"));
         out.push_str(&format!("| Antipatterns | {} |\n", repo.antipatterns_found));
         if let Some(wp) = repo.highest_pr {
             out.push_str(&format!(

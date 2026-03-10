@@ -300,17 +300,58 @@ impl PRBouncer for PatchBouncer {
         let cfg = match lang_for_ext(ext) {
             Some(c) => c,
             None => {
-                // IaC text-format bypass: these extensions routinely contain
-                // high-entropy content (sha256 hashes, base64 digests, lockfile
-                // checksums) that sits outside the agnostic shield's normal entropy
-                // band but is definitively human-readable text — never binary.
-                // Running the entropy classifier on them produces systematic false
-                // positives (e.g. every r-ryantm NixOS version-bump PR fires as
-                // AnomalousBlob because nix sha256 hash strings have ~6 bits/char).
-                const IAC_TEXT_EXTS: &[&str] = &[
-                    "nix", "lock", "json", "toml", "yaml", "yml", "csv", "md", "rst", "xml",
+                // Source-text bypass: extensions that are definitively human-readable
+                // source or configuration — never binary blobs.  Two categories:
+                //
+                // (A) IaC / data formats: routinely contain high-entropy content
+                //     (sha256 hashes, base64 digests, lockfile checksums) that sits
+                //     outside the agnostic shield's entropy band but is text.
+                //
+                // (B) Polyglot-known grammars not wired into lang_for_ext (e.g. bash,
+                //     TypeScript, Kotlin) plus other well-known source extensions
+                //     (Scala, Gradle, PowerShell, Windows batch, Go module files…).
+                //     Rule: if our polyglot registry has a grammar for the extension,
+                //     it is definitively source — never run the binary classifier.
+                //
+                // Keep in sync with `polyglot::LazyGrammarRegistry::get` arm list.
+                const SOURCE_TEXT_EXTS: &[&str] = &[
+                    // ── IaC / data formats ────────────────────────────────────
+                    "nix",
+                    "lock",
+                    "json",
+                    "toml",
+                    "yaml",
+                    "yml",
+                    "csv",
+                    "md",
+                    "rst",
+                    "xml",
+                    // ── Polyglot-known grammars not in lang_for_ext ───────────
+                    "ts",
+                    "tsx",
+                    "mjs",
+                    "cjs", // TypeScript / JS variants
+                    "sh",
+                    "bash", // Bash (polyglot: tree-sitter-bash)
+                    "tf",
+                    "hcl", // Terraform / HCL
+                    "gd",  // GDScript
+                    "kt",
+                    "kts", // Kotlin
+                    // ── Explicitly whitelisted source extensions ──────────────
+                    "gradle",     // Gradle build (Groovy/Kotlin DSL)
+                    "scala",      // Scala source
+                    "mod",        // Go module / Rust module files
+                    "go-version", // Go toolchain pin files
+                    "properties", // Java .properties config
+                    "env",        // .env config files
+                    "bat",
+                    "ps1",
+                    "cmd",              // Windows script files
+                    "patch",            // Diff/patch files (text diffs, may contain hashes)
+                    "permitted-images", // Kubernetes allowed-image list files
                 ];
-                if IAC_TEXT_EXTS.contains(&ext) {
+                if SOURCE_TEXT_EXTS.contains(&ext) {
                     return Ok(SlopScore::default());
                 }
 
