@@ -115,6 +115,7 @@ release version: audit (bump-version version)
 parallel-audit REPO_SLUG LIMIT="50" TIMEOUT="30":
 	#!/usr/bin/env bash
 	set -euo pipefail
+	REPO_SLUG="{{REPO_SLUG}}"
 	REPO_NAME="${REPO_SLUG##*/}"
 	GAUNTLET_DIR="${GAUNTLET_DIR:-$HOME/dev/gauntlet}"
 	REPO_DIR="$GAUNTLET_DIR/$REPO_NAME"

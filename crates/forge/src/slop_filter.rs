@@ -300,6 +300,19 @@ impl PRBouncer for PatchBouncer {
         let cfg = match lang_for_ext(ext) {
             Some(c) => c,
             None => {
+                // IaC text-format bypass: these extensions routinely contain
+                // high-entropy content (sha256 hashes, base64 digests, lockfile
+                // checksums) that sits outside the agnostic shield's normal entropy
+                // band but is definitively human-readable text — never binary.
+                // Running the entropy classifier on them produces systematic false
+                // positives (e.g. every r-ryantm NixOS version-bump PR fires as
+                // AnomalousBlob because nix sha256 hash strings have ~6 bits/char).
+                const IAC_TEXT_EXTS: &[&str] =
+                    &["nix", "lock", "json", "toml", "yaml", "yml", "csv"];
+                if IAC_TEXT_EXTS.contains(&ext) {
+                    return Ok(SlopScore::default());
+                }
+
                 // Unknown / unsupported language — run agnostic shield on added bytes.
                 let added: String = patch
                     .lines()
@@ -313,8 +326,16 @@ impl PRBouncer for PatchBouncer {
                         ByteLatticeAnalyzer::classify(added.as_bytes()),
                         TextClass::AnomalousBlob
                     ) {
+                        // Include a description so antipatterns.len() == antipatterns_found
+                        // (data-integrity invariant: the stored score must be reconstructible
+                        // from the stored detail fields).
                         return Ok(SlopScore {
                             antipatterns_found: 1,
+                            antipattern_details: vec![format!(
+                                "AnomalousBlob: high-entropy or non-text content detected \
+                                 in .{ext} patch section — possible embedded binary or \
+                                 generated data."
+                            )],
                             ..SlopScore::default()
                         });
                     }
