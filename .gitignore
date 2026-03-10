@@ -71,14 +71,16 @@ attestations/local/
 
 
 # ------------------------------------------------------------------------------
-# 4. AI ASSISTANT INSTRUCTIONS
-# CLAUDE.md contains internal architecture directives, supply-chain SHAs, and
-# operational guidance for AI coding assistants. It is a local working document
-# and must not be committed to the public repository.
-# .claude/ is the Claude Code local state directory.
-# .agent/ is reserved for any future agentic runtime state.
+# 4. AI ASSISTANT INSTRUCTIONS & LOCAL OPERATIONAL DOCS
+# CLAUDE.md     — internal architecture directives and AI coding-assistant config.
+# RUNBOOK.md    — designer-facing operational command reference (local paths,
+#                 Fly.io deployment commands, personal gauntlet targets).
+# .claude/      — Claude Code local state directory.
+# .agent/       — reserved for future agentic runtime state.
+# All four are local working documents; never commit to the public repository.
 # ------------------------------------------------------------------------------
 CLAUDE.md
+RUNBOOK.md
 .claude/
 .agent/
 
