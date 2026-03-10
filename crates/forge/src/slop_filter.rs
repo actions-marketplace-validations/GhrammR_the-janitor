@@ -233,6 +233,24 @@ fn lang_for_ext(ext: &str) -> Option<LangConfig> {
                   body: (compound_statement) @fn.body)
             "#,
         }),
+        // Scala: captures def (function_definition), class, and object top-level entities.
+        "scala" => Some(LangConfig {
+            language: tree_sitter_scala::LANGUAGE.into(),
+            query_src: r#"
+                (function_definition
+                  name: (identifier) @fn.name
+                  body: (block) @fn.body)
+            "#,
+        }),
+        // Bash / shell scripts: function definitions only.
+        "sh" | "bash" | "cmd" | "zsh" => Some(LangConfig {
+            language: tree_sitter_bash::LANGUAGE.into(),
+            query_src: r#"
+                (function_definition
+                  name: (word) @fn.name
+                  body: (compound_statement) @fn.body)
+            "#,
+        }),
         // Objective-C / Objective-C++: covers both C-style free functions and simple
         // unary ObjC method selectors (e.g. `dealloc`, `sharedInstance`).
         // Multi-keyword selectors are excluded — they are not in the dead-code hot path.
@@ -331,23 +349,23 @@ impl PRBouncer for PatchBouncer {
                     "tsx",
                     "mjs",
                     "cjs", // TypeScript / JS variants
-                    "sh",
-                    "bash", // Bash (polyglot: tree-sitter-bash)
+                    // "sh" | "bash" | "cmd" | "zsh" — now wired into lang_for_ext (Bash grammar)
+                    // "scala" — now wired into lang_for_ext (Scala grammar)
                     "tf",
                     "hcl", // Terraform / HCL
                     "gd",  // GDScript
                     "kt",
                     "kts", // Kotlin
                     // ── Explicitly whitelisted source extensions ──────────────
-                    "gradle",     // Gradle build (Groovy/Kotlin DSL)
-                    "scala",      // Scala source
-                    "mod",        // Go module / Rust module files
+                    "gradle", // Gradle build (Groovy/Kotlin DSL) — no grammar crate
+                    // "scala" moved to lang_for_ext
+                    "mod", // Go module files — tree-sitter-gomod (^0.20) incompatible with ts 0.26
                     "go-version", // Go toolchain pin files
                     "properties", // Java .properties config
-                    "env",        // .env config files
+                    "env", // .env config files
                     "bat",
                     "ps1",
-                    "cmd",              // Windows script files
+                    // "cmd" moved to lang_for_ext (bash grammar covers Windows cmd-like scripts)
                     "patch",            // Diff/patch files (text diffs, may contain hashes)
                     "permitted-images", // Kubernetes allowed-image list files
                 ];

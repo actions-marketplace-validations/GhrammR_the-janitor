@@ -22,6 +22,7 @@ tree-sitter-glsl.workspace = true
 tree-sitter-objc.workspace = true
 tree-sitter-yaml.workspace = true
 tree-sitter-bash.workspace = true
+tree-sitter-scala.workspace = true
 arc-swap.workspace = true
 git2.workspace = true
 rkyv.workspace = true

@@ -59,6 +59,10 @@ static GLSL_QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
 static OBJC_QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
 /// Static cache for the Nix entity extraction query.
 static NIX_QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+/// Static cache for the Scala entity extraction query.
+static SCALA_QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+/// Static cache for the Bash entity extraction query.
+static BASH_QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
 
 /// S-expression for JS / JSX grammars.
 const JS_ENTITY_S_EXPR: &str = r#"
@@ -350,6 +354,46 @@ const NIX_ENTITY_S_EXPR: &str = r#"
 const NIX_PATTERNS: &[(&str, &str, EntityType)] =
     &[("bind.def", "bind.name", EntityType::Assignment)];
 
+/// S-expression for Scala grammar entity extraction.
+///
+/// Captures `def` (function_definition), `class`, and `object` top-level definitions.
+/// Covers Scala 2 and Scala 3 syntax. `val_definition` / `val_declaration` are captured
+/// as `Assignment` entities, contributing to the dead-symbol surface.
+const SCALA_ENTITY_S_EXPR: &str = r#"
+    (function_definition
+      name: (identifier) @fn.name) @fn.def
+
+    (class_definition
+      name: (identifier) @class.name) @class.def
+
+    (object_definition
+      name: (identifier) @obj.name) @obj.def
+
+    (val_definition
+      pattern: (identifier) @val.name) @val.def
+"#;
+
+/// Pattern-index → (def_cap, name_cap, entity_type) mapping for Scala grammar.
+const SCALA_PATTERNS: &[(&str, &str, EntityType)] = &[
+    ("fn.def", "fn.name", EntityType::FunctionDefinition),
+    ("class.def", "class.name", EntityType::ClassDefinition),
+    ("obj.def", "obj.name", EntityType::ClassDefinition), // `object` ≈ singleton class
+    ("val.def", "val.name", EntityType::Assignment),
+];
+
+/// S-expression for Bash grammar entity extraction.
+///
+/// Captures `function_definition` nodes — both POSIX `name() { }` and
+/// `function name { }` forms. The `word` node holds the function name.
+const BASH_ENTITY_S_EXPR: &str = r#"
+    (function_definition
+      name: (word) @fn.name) @fn.def
+"#;
+
+/// Pattern-index → (def_cap, name_cap, entity_type) mapping for Bash grammar.
+const BASH_PATTERNS: &[(&str, &str, EntityType)] =
+    &[("fn.def", "fn.name", EntityType::FunctionDefinition)];
+
 fn get_c_query() -> Result<&'static Query, AnatomistError> {
     C_QUERY
         .get_or_init(|| {
@@ -413,6 +457,26 @@ fn get_nix_query() -> Result<&'static Query, AnatomistError> {
     NIX_QUERY
         .get_or_init(|| {
             Query::new(&tree_sitter_nix::LANGUAGE.into(), NIX_ENTITY_S_EXPR)
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| AnatomistError::ParseFailure(e.clone()))
+}
+
+fn get_scala_query() -> Result<&'static Query, AnatomistError> {
+    SCALA_QUERY
+        .get_or_init(|| {
+            Query::new(&tree_sitter_scala::LANGUAGE.into(), SCALA_ENTITY_S_EXPR)
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| AnatomistError::ParseFailure(e.clone()))
+}
+
+fn get_bash_query() -> Result<&'static Query, AnatomistError> {
+    BASH_QUERY
+        .get_or_init(|| {
+            Query::new(&tree_sitter_bash::LANGUAGE.into(), BASH_ENTITY_S_EXPR)
                 .map_err(|e| e.to_string())
         })
         .as_ref()
@@ -596,11 +660,15 @@ impl ParserHost {
             "m" | "mm" => Self::extract_objc_entities(source, &normalized_path),
             // Nix: attribute-binding entity extraction.
             "nix" => Self::extract_nix_entities(source, &normalized_path),
+            // Scala: full entity extraction (def / class / object / val).
+            "scala" => Self::extract_scala_entities(source, &normalized_path),
+            // Bash / shell: function_definition extraction.
+            "sh" | "bash" | "cmd" | "zsh" => Self::extract_bash_entities(source, &normalized_path),
             // Polyglot-registered grammars without a dedicated entity extractor.
             // Parsing happens locally (grammar is in the registry); we return an
             // empty entity list rather than falling through to the Induction Bridge
             // and triggering a cloud POST.
-            "yaml" | "yml" | "sh" | "bash" | "tf" | "hcl" | "gd" | "kt" | "kts" => Ok(vec![]),
+            "yaml" | "yml" | "tf" | "hcl" | "gd" | "kt" | "kts" => Ok(vec![]),
             _ => {
                 // Unknown extension: attempt to learn via the Induction Bridge.
                 //
@@ -827,6 +895,43 @@ impl ParserHost {
             get_nix_query()?,
             file_path,
             NIX_PATTERNS,
+        )
+    }
+
+    /// Extracts `def`, `class`, `object`, and `val` entities from a Scala source buffer.
+    ///
+    /// Covers both Scala 2 and Scala 3 syntax. `object_definition` nodes are recorded
+    /// as `ClassDefinition` (singleton class). `val_definition` nodes are recorded as
+    /// `Assignment` — contributing to the dead-symbol surface for unused constants.
+    /// `protected_by` is `None` for all returned entities.
+    pub fn extract_scala_entities(
+        source: &[u8],
+        file_path: &str,
+    ) -> Result<Vec<Entity>, AnatomistError> {
+        extract_named_entities(
+            source,
+            tree_sitter_scala::LANGUAGE.into(),
+            get_scala_query()?,
+            file_path,
+            SCALA_PATTERNS,
+        )
+    }
+
+    /// Extracts `function_definition` entities from a Bash source buffer.
+    ///
+    /// Captures both POSIX `name() { }` and `function name { }` forms.
+    /// The `word` node holds the function name in tree-sitter-bash grammar.
+    /// `protected_by` is `None` for all returned entities.
+    pub fn extract_bash_entities(
+        source: &[u8],
+        file_path: &str,
+    ) -> Result<Vec<Entity>, AnatomistError> {
+        extract_named_entities(
+            source,
+            tree_sitter_bash::LANGUAGE.into(),
+            get_bash_query()?,
+            file_path,
+            BASH_PATTERNS,
         )
     }
 
@@ -1521,11 +1626,14 @@ mod tests {
         // Minimal valid source for each new polyglot grammar.
         // Note: "nix" is excluded here — it now has a real entity extractor and
         // is covered by test_nix_binding_entities below.
+        // Note: "sh"/"bash" are excluded — they now have a real extractor and are
+        // covered by test_bash_entity_extraction below.
+        // Note: "scala" is excluded — it now has a real extractor and is
+        // covered by test_scala_entity_extraction below.
         let cases: &[(&str, &[u8])] = &[
             ("tf", b"resource \"aws_instance\" \"web\" {}"),
             ("hcl", b"variable \"region\" { default = \"us-east-1\" }"),
             ("yaml", b"key: value\n"),
-            ("sh", b"#!/bin/bash\necho hello\n"),
             ("gd", b"func _ready():\n  pass\n"),
             ("kt", b"fun main() { println(\"hi\") }"),
         ];
@@ -1597,5 +1705,66 @@ mod tests {
         let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"pname"), "expected 'pname' binding");
         assert!(names.contains(&"version"), "expected 'version' binding");
+    }
+
+    #[test]
+    fn test_scala_entity_extraction() {
+        let source = b"
+class MyService {
+  def process(input: String): Unit = {}
+  def helper(): Int = 42
+}
+object MyService {
+  val defaultTimeout = 30
+}
+";
+        let entities = ParserHost::extract_scala_entities(source, "src/MyService.scala").unwrap();
+        assert!(
+            !entities.is_empty(),
+            "Scala entities must be extracted; got 0"
+        );
+        let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"MyService"), "expected class 'MyService'");
+        assert!(names.contains(&"process"), "expected method 'process'");
+        assert!(names.contains(&"helper"), "expected method 'helper'");
+        for e in &entities {
+            assert_eq!(e.file_path, "src/MyService.scala");
+            assert!(e.end_byte > e.start_byte);
+        }
+    }
+
+    #[test]
+    fn test_bash_entity_extraction() {
+        let source = b"#!/usr/bin/env bash
+function build() {
+  cargo build --release
+}
+deploy() {
+  scp target/release/janitor server:/usr/local/bin/
+}
+";
+        let entities = ParserHost::extract_bash_entities(source, "scripts/deploy.sh").unwrap();
+        assert!(
+            !entities.is_empty(),
+            "Bash function entities must be extracted; got 0"
+        );
+        let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"build"), "expected function 'build'");
+        assert!(names.contains(&"deploy"), "expected function 'deploy'");
+        for e in &entities {
+            assert_eq!(e.file_path, "scripts/deploy.sh");
+            assert!(e.end_byte > e.start_byte);
+        }
+    }
+
+    #[test]
+    fn test_bash_no_functions_empty() {
+        // A bash script with no function definitions yields no entities.
+        let source = b"#!/bin/bash\necho hello\nexport PATH=$PATH:/usr/local/bin\n";
+        let entities = ParserHost::extract_bash_entities(source, "scripts/simple.sh").unwrap();
+        assert!(
+            entities.is_empty(),
+            "script with no functions must yield empty entity list"
+        );
     }
 }
