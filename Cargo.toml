@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "tools/wisdom-bake", "tools/mint-token", "tools/parallel-bounce"]
+members = ["crates/*", "tools/wisdom-bake", "tools/mint-token", "tools/parallel-bounce", "tools/gauntlet-runner"]
 resolver = "2"
 
 [workspace.package]

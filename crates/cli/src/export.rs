@@ -31,6 +31,119 @@
 use anyhow::Result;
 use std::path::Path;
 
+/// Export all bounce logs found under `gauntlet_root` to a single aggregate CSV file.
+///
+/// Discovers every `<gauntlet_root>/*/` sub-directory containing a
+/// `.janitor/bounce_log.ndjson` and concatenates their entries into `out`.
+/// The `Repo_Slug` column distinguishes rows from different repositories.
+///
+/// Mirrors the per-repo schema of [`cmd_export`] exactly; the output can be
+/// loaded into the same Excel/pandas pipelines as a single-repo CSV.
+pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
+    use crate::report::discover_bounce_logs;
+
+    let repo_logs = discover_bounce_logs(gauntlet_root);
+    if repo_logs.is_empty() {
+        anyhow::bail!(
+            "No bounce logs found under `{}`. \
+             Run `janitor bounce` in each repo to populate logs.",
+            gauntlet_root.display()
+        );
+    }
+
+    let total_entries: usize = repo_logs.iter().map(|(_, v)| v.len()).sum();
+    eprintln!(
+        "Aggregating {} entries across {} repos → {}",
+        total_entries,
+        repo_logs.len(),
+        out.display()
+    );
+
+    let mut wtr = csv::Writer::from_path(out)
+        .map_err(|e| anyhow::anyhow!("Cannot create CSV file {}: {}", out.display(), e))?;
+
+    wtr.write_record([
+        "PR_Number",
+        "Author",
+        "Score",
+        "Mesa_Triggered",
+        "Trust_Delta",
+        "Unlinked_PR",
+        "Dead_Code_Count",
+        "Logic_Clones",
+        "Zombie_Syms",
+        "Zombie_Deps",
+        "Violation_Reasons",
+        "Time_Saved_Hours",
+        "Operational_Savings_USD",
+        "Timestamp",
+        "PR_State",
+        "Is_Bot",
+        "Repo_Slug",
+    ])?;
+
+    const MINUTES_PER_TRIAGE: f64 = 12.0;
+    const HOURLY_COST_USD: f64 = 100.0;
+
+    for (_repo_name, entries) in repo_logs {
+        for entry in &entries {
+            let actionable = entry.slop_score >= 100
+                || entry.zombie_symbols_added > 0
+                || entry
+                    .antipatterns
+                    .iter()
+                    .any(|a| a.contains("Unverified Security Bump"));
+
+            let time_saved_h = if actionable {
+                MINUTES_PER_TRIAGE / 60.0
+            } else {
+                0.0_f64
+            };
+            let savings_usd = time_saved_h * HOURLY_COST_USD;
+
+            let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
+            let score_str = entry.slop_score.to_string();
+            let unlinked_str = entry.unlinked_pr.to_string();
+            let dead_str = entry.dead_symbols_added.to_string();
+            let clones_str = entry.logic_clones_found.to_string();
+            let zombie_syms_str = entry.zombie_symbols_added.to_string();
+            let zombie_deps_str = entry.zombie_deps.join(" | ");
+            let violation_reasons = build_violation_reasons(entry);
+            let time_str = format!("{time_saved_h:.4}");
+            let savings_str = format!("{savings_usd:.2}");
+            let state_str = entry.state.to_string();
+            let is_bot_str = if entry.is_bot { "TRUE" } else { "FALSE" };
+
+            wtr.write_record([
+                pr_num_str.as_str(),
+                entry.author.as_deref().unwrap_or(""),
+                score_str.as_str(),
+                "FALSE",
+                "0",
+                unlinked_str.as_str(),
+                dead_str.as_str(),
+                clones_str.as_str(),
+                zombie_syms_str.as_str(),
+                zombie_deps_str.as_str(),
+                violation_reasons.as_str(),
+                time_str.as_str(),
+                savings_str.as_str(),
+                entry.timestamp.as_str(),
+                state_str.as_str(),
+                is_bot_str,
+                entry.repo_slug.as_str(),
+            ])?;
+        }
+    }
+
+    wtr.flush()?;
+    println!(
+        "Exported {total_entries} entries (global) → {}",
+        out.display()
+    );
+    Ok(())
+}
+
 /// Export the bounce log at `<repo>/.janitor/bounce_log.ndjson` to a CSV file.
 ///
 /// Creates or overwrites `out`.  When the bounce log is absent or empty, falls

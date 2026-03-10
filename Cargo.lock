@@ -912,6 +912,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gauntlet-runner"
+version = "6.11.8"
+dependencies = [
+ "anyhow",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

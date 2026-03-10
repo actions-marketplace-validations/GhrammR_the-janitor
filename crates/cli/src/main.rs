@@ -316,11 +316,24 @@ enum Commands {
     /// single cell; split on `;` inside Excel / pandas to expand them.
     Export {
         /// Project root (reads `<repo>/.janitor/bounce_log.ndjson`).
+        ///
+        /// Ignored when `--global` is set.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
         /// Output CSV file path.
         #[arg(long, short = 'o', default_value = "bounce_export.csv")]
         out: PathBuf,
+        /// Aggregate bounce logs from ALL repos under a gauntlet directory.
+        ///
+        /// When set, `--repo` is ignored and every `<gauntlet-dir>/*/` sub-directory
+        /// that contains a `.janitor/bounce_log.ndjson` contributes rows to the output.
+        #[arg(long)]
+        global: bool,
+        /// Root directory for `--global` aggregation.
+        ///
+        /// Defaults to `~/dev/gauntlet/` when `--global` is set.
+        #[arg(long)]
+        gauntlet_dir: Option<PathBuf>,
     },
 
     /// Teach the local brain to suppress a recurring false positive.
@@ -496,7 +509,24 @@ async fn main() -> anyhow::Result<()> {
             daemon::unix::serve(std::path::Path::new(socket), &registry_path).await?;
         }
         Commands::UpdateWisdom { path } => cmd_update_wisdom(path)?,
-        Commands::Export { repo, out } => export::cmd_export(repo, out)?,
+        Commands::Export {
+            repo,
+            out,
+            global,
+            gauntlet_dir,
+        } => {
+            if *global {
+                let default_gauntlet = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("dev")
+                    .join("gauntlet");
+                let root = gauntlet_dir.as_deref().unwrap_or(&default_gauntlet);
+                export::cmd_export_global(root, out)?;
+            } else {
+                export::cmd_export(repo, out)?;
+            }
+        }
         Commands::Pardon { symbol, repo } => cmd_pardon(symbol, repo)?,
     }
 

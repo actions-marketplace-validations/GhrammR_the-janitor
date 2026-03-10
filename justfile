@@ -142,6 +142,27 @@ parallel-audit REPO_SLUG LIMIT="50" TIMEOUT="30":
 	    --limit   "{{LIMIT}}"   \
 	    --timeout "{{TIMEOUT}}"
 
+# 6. MULTI-REPO GAUNTLET
+# Deterministic Rust orchestrator replacing ultimate_gauntlet.sh.
+# Reads gauntlet_targets.txt (one owner/repo per line), bounces PRs in parallel
+# within each repo (2-worker RAM gate), then generates a global PDF + CSV export.
+#
+# Usage:
+#   just run-gauntlet                        # defaults from gauntlet_targets.txt
+#   just run-gauntlet --pr-limit 50          # 50 PRs per repo
+#   just run-gauntlet --pr-limit 5000 --timeout 60
+#   just run-gauntlet --targets my_repos.txt --out-dir ~/Desktop
+#
+run-gauntlet *ARGS:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -z "${IN_NIX_SHELL:-}" ]] && command -v nix &>/dev/null; then
+	    echo "↳ Entering Nix hermetic shell..."
+	    exec nix develop --command just run-gauntlet {{ARGS}}
+	fi
+	cargo build --release -p gauntlet-runner
+	./target/release/gauntlet-runner {{ARGS}}
+
 # 6. DOCUMENTATION
 deploy-docs:
 	uv run --with "mkdocs-material<9.6" --with "mkdocs<2" mkdocs gh-deploy --force
