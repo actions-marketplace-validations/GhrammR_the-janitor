@@ -1,5 +1,7 @@
 # gauntlet-runner targets — one owner/repo per line
 # Blank lines and lines starting with '#' are skipped.
+
+# Original Tier-1 targets (15)
 godotengine/godot
 NixOS/nixpkgs
 microsoft/vscode
@@ -14,4 +16,13 @@ home-assistant/core
 ansible/ansible
 cloudflare/workers-sdk
 langchain-ai/langchain
-deno/deno
+denoland/deno
+
+# New ecosystem targets — Ruby, PHP, Swift, C#, Kotlin, HCL, Lua (7)
+rails/rails
+laravel/framework
+apple/swift
+dotnet/aspnetcore
+square/okhttp
+hashicorp/terraform
+neovim/neovim
