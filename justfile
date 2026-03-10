@@ -138,6 +138,17 @@ parallel-audit REPO_SLUG LIMIT="50" TIMEOUT="30":
 	fi
 
 	echo "==> parallel-audit  repo={{REPO_SLUG}}  limit={{LIMIT}}  timeout={{TIMEOUT}}s"
+
+	# Clean slate: remove stale bounce log before dispatching parallel-bounce.
+	# janitor bounce is append-only; ghost entries from prior runs must not
+	# pollute the report for this run.
+	LOG_PATH="$REPO_DIR/.janitor/bounce_log.ndjson"
+	mkdir -p "$REPO_DIR/.janitor"
+	if [[ -f "$LOG_PATH" ]]; then
+	    echo "  Purging stale bounce log: $LOG_PATH"
+	    rm -f "$LOG_PATH"
+	fi
+
 	"$PBOUNCE" "$CACHE" "$REPO_DIR" "$JANITOR" "{{REPO_SLUG}}" \
 	    --limit   "{{LIMIT}}"   \
 	    --timeout "{{TIMEOUT}}"

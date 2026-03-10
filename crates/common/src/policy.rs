@@ -222,30 +222,41 @@ impl JanitorPolicy {
 
     /// Returns `true` when `author` is a recognized automation account.
     ///
-    /// Three detection layers, evaluated in order — all zero-allocation in the
+    /// Four detection layers, evaluated in order — all zero-allocation in the
     /// hot path (no `String` clones):
     ///
-    /// 1. **GitHub App suffix** — any author ending with `[bot]` is
-    ///    unconditionally recognized (Dependabot, Renovate, GitHub Actions apps,
-    ///    etc.).  No configuration required.
+    /// 1. **GitHub App path prefix** — any author beginning with `app/` is
+    ///    unconditionally a GitHub App installation (e.g. `app/dependabot`,
+    ///    `app/renovate`, `app/github-actions`).  No configuration required.
+    ///    GitHub's REST API resolves App-authored PRs to this `app/<slug>`
+    ///    format when queried via `gh pr list --json author`.
     ///
-    /// 2. **`trusted_bot_authors`** — handles listed at the top level of
+    /// 2. **GitHub App suffix** — any author ending with `[bot]` is
+    ///    unconditionally recognized (e.g. `dependabot[bot]`, `renovate[bot]`).
+    ///    No configuration required.
+    ///
+    /// 3. **`trusted_bot_authors`** — handles listed at the top level of
     ///    `janitor.toml`.  Backwards-compatible with existing manifests.
     ///
-    /// 3. **`[forge].automation_accounts`** — handles listed in the `[forge]`
+    /// 4. **`[forge].automation_accounts`** — handles listed in the `[forge]`
     ///    sub-section of `janitor.toml`.  Designed for ecosystem accounts that
     ///    lack the `[bot]` suffix (e.g. `r-ryantm`, `app/nixpkgs-ci`).
     ///
-    /// Matching is **case-insensitive** and exact (no globs, no prefix matching).
+    /// Matching for layers 3 and 4 is **case-insensitive** and exact.
     ///
-    /// When all lists are empty (the default), only the `[bot]` suffix rule
-    /// fires — no author is unconditionally exempted by configuration alone.
+    /// When all config lists are empty (the default), only layers 1 and 2 fire —
+    /// no author is unconditionally exempted by configuration alone.
     pub fn is_automation_account(&self, author: &str) -> bool {
-        // Layer 1: standard GitHub App suffix — zero-allocation static check.
+        // Layer 1: GitHub App path prefix — `app/<slug>` format used by
+        // GitHub's REST API for App-authored PRs.  Zero-allocation check.
+        if author.starts_with("app/") {
+            return true;
+        }
+        // Layer 2: standard GitHub App suffix — zero-allocation static check.
         if author.ends_with("[bot]") {
             return true;
         }
-        // Layer 2 & 3: config-defined lists — `eq_ignore_ascii_case` is
+        // Layers 3 & 4: config-defined lists — `eq_ignore_ascii_case` is
         // zero-allocation (byte-level comparison, no String allocation).
         self.trusted_bot_authors
             .iter()
@@ -411,12 +422,27 @@ mod tests {
     }
 
     #[test]
-    fn non_bot_suffix_not_detected_without_config() {
-        // Accounts without [bot] suffix and not in any config list must NOT fire.
+    fn non_bot_prefix_or_suffix_not_detected_without_config() {
+        // Accounts without "app/" prefix, "[bot]" suffix, and not in any config
+        // list must NOT be detected.
         let p = JanitorPolicy::default();
         assert!(!p.is_automation_account("r-ryantm"));
-        assert!(!p.is_automation_account("app/nixpkgs-ci"));
+        assert!(!p.is_automation_account("human-dev"));
         assert!(!p.is_automation_account(""));
+    }
+
+    #[test]
+    fn app_prefix_detected_without_config() {
+        // Any author beginning with "app/" is unconditionally a GitHub App
+        // installation — no trusted_bot_authors or automation_accounts entry
+        // required.  This covers "app/dependabot", "app/renovate", etc.
+        let p = JanitorPolicy::default();
+        assert!(p.is_automation_account("app/dependabot"));
+        assert!(p.is_automation_account("app/renovate"));
+        assert!(p.is_automation_account("app/github-actions"));
+        assert!(p.is_automation_account("app/nixpkgs-ci"));
+        // Must not fire for strings that merely contain "app/" in the middle.
+        assert!(!p.is_automation_account("myapp/renovate"));
     }
 
     #[test]

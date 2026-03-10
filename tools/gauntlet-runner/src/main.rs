@@ -323,6 +323,22 @@ fn main() {
             repo_dir.display()
         );
 
+        // ── Clean slate: purge stale bounce log ──────────────────────────────
+        // `janitor bounce` is append-only.  Delete any residual log before
+        // dispatching the rayon pool so that ghost entries from prior runs
+        // cannot pollute this repo's aggregate report.
+        let log_path = repo_dir.join(".janitor").join("bounce_log.ndjson");
+        if log_path.exists() {
+            if let Err(e) = std::fs::remove_file(&log_path) {
+                eprintln!(
+                    "  warning: Could not purge stale bounce log `{}`: {e}",
+                    log_path.display()
+                );
+            } else {
+                eprintln!("  Stale log purged → {}", log_path.display());
+            }
+        }
+
         // ── Atomic counters for this repo ────────────────────────────────────
         use std::sync::atomic::{AtomicUsize, Ordering};
         let processed = Arc::new(AtomicUsize::new(0));
