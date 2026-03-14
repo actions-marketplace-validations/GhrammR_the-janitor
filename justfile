@@ -99,35 +99,38 @@ release version: audit (bump-version version)
 	uv run --with "mkdocs-material<9.6" --with "mkdocs<2" mkdocs gh-deploy --force
 	@echo "💀 Release v{{version}} deployed."
 
-# 5. PARALLEL AUDIT
-# Bounce PRs from a cached JSON list using the 2-worker Rust-native parallel
-# engine.  The RAM gate (2-thread rayon pool) caps peak RSS at ~500 MB.
-# The git lock serialises gh pr diff fetches to prevent fd exhaustion.
+# 5. UNIFIED AUDIT PIPELINE
+# Two-stage: Harvest (parallel-bounce → bounce_log.ndjson) then
+# Present (janitor report + export → PDF + CSV).
+# Self-contained: bootstraps the PR metadata cache via gh pr list on first
+# run — no prior script invocation required.
 #
 # Usage:
-#   just parallel-audit NixOS/nixpkgs                          # first 50 PRs
-#   just parallel-audit NixOS/nixpkgs 200                      # first 200 PRs
-#   just parallel-audit godotengine/godot 5000 60              # all, 60s timeout
+#   just parallel-audit NixOS/nixpkgs                    # 50 PRs, PDF+CSV to $(pwd)
+#   just parallel-audit NixOS/nixpkgs 200                # 200 PRs
+#   just parallel-audit godotengine/godot 5000 60        # 5000 PRs, 60s timeout
+#   just parallel-audit NixOS/nixpkgs 50 30 ~/Desktop   # custom output dir
 #
 # REPO_SLUG  — GitHub owner/repo
 # LIMIT      — max PRs to process  (default: 50)
 # TIMEOUT    — seconds per bounce  (default: 30)
-parallel-audit REPO_SLUG LIMIT="50" TIMEOUT="30":
+# OUT_DIR    — directory for PDF + CSV output (default: current directory)
+parallel-audit REPO_SLUG LIMIT="50" TIMEOUT="30" OUT_DIR="":
 	#!/usr/bin/env bash
 	set -euo pipefail
 	REPO_SLUG="{{REPO_SLUG}}"
 	REPO_NAME="${REPO_SLUG##*/}"
+	REPO_SLUG_SAFE="${REPO_SLUG//\//_}"
 	GAUNTLET_DIR="${GAUNTLET_DIR:-$HOME/dev/gauntlet}"
 	REPO_DIR="$GAUNTLET_DIR/$REPO_NAME"
 	CACHE="$HOME/.janitor/pkg_cache_${REPO_NAME}.json"
 	JANITOR="${JANITOR:-$(pwd)/target/release/janitor}"
 	PBOUNCE="$(pwd)/target/release/parallel-bounce"
+	OUT_DIR_ARG="{{OUT_DIR}}"
+	OUT_DIR="${OUT_DIR_ARG:-$(pwd)}"
+	PDF_OUT="$OUT_DIR/${REPO_SLUG_SAFE}_intelligence_report.pdf"
+	CSV_OUT="$OUT_DIR/${REPO_SLUG_SAFE}_audit.csv"
 
-	if [[ ! -f "$CACHE" ]]; then
-	    echo "Cache not found: $CACHE"
-	    echo "Run generate_client_package.sh first to populate the PR cache."
-	    exit 1
-	fi
 	if [[ ! -x "$PBOUNCE" ]]; then
 	    echo "parallel-bounce not built — run: cargo build --release -p parallel-bounce"
 	    exit 1
@@ -136,14 +139,42 @@ parallel-audit REPO_SLUG LIMIT="50" TIMEOUT="30":
 	    echo "janitor not built — run: just build"
 	    exit 1
 	fi
+	if ! command -v gh &>/dev/null; then
+	    echo "gh CLI not found in PATH — required for PR metadata fetch"
+	    exit 1
+	fi
+	if ! command -v jq &>/dev/null; then
+	    echo "jq not found in PATH — required for cache validation"
+	    exit 1
+	fi
+	mkdir -p "$REPO_DIR/.janitor" "$HOME/.janitor"
 
-	echo "==> parallel-audit  repo={{REPO_SLUG}}  limit={{LIMIT}}  timeout={{TIMEOUT}}s"
+	# ── Cache bootstrap ─────────────────────────────────────────────────────
+	# Schema guard: invalidate caches that predate the 'state' field.
+	if [[ -f "$CACHE" ]] && \
+	    jq -e '(length > 0) and (.[0] | has("state") | not)' "$CACHE" > /dev/null 2>&1; then
+	    echo "  Cache schema outdated — invalidating: $CACHE"
+	    rm -f "$CACHE"
+	fi
+	if [[ ! -f "$CACHE" ]]; then
+	    echo "==> Fetching PR metadata: $REPO_SLUG (up to {{LIMIT}} PRs)..."
+	    gh pr list \
+	        --repo  "$REPO_SLUG" \
+	        --state all \
+	        --limit "{{LIMIT}}" \
+	        --json  number,author,body,state,mergeable \
+	        > "$CACHE"
+	    echo "    Cached $(jq 'length' "$CACHE") PRs → $CACHE"
+	fi
 
-	# Clean slate: remove stale bounce log before dispatching parallel-bounce.
-	# janitor bounce is append-only; ghost entries from prior runs must not
-	# pollute the report for this run.
+	echo ""
+	echo "==> Stage 1: Harvest  repo=$REPO_SLUG  limit={{LIMIT}}  timeout={{TIMEOUT}}s"
+	echo "    PDF → $PDF_OUT"
+	echo "    CSV → $CSV_OUT"
+	echo ""
+
+	# Purge stale bounce log — bounce is append-only.
 	LOG_PATH="$REPO_DIR/.janitor/bounce_log.ndjson"
-	mkdir -p "$REPO_DIR/.janitor"
 	if [[ -f "$LOG_PATH" ]]; then
 	    echo "  Purging stale bounce log: $LOG_PATH"
 	    rm -f "$LOG_PATH"
@@ -152,6 +183,27 @@ parallel-audit REPO_SLUG LIMIT="50" TIMEOUT="30":
 	"$PBOUNCE" "$CACHE" "$REPO_DIR" "$JANITOR" "{{REPO_SLUG}}" \
 	    --limit   "{{LIMIT}}"   \
 	    --timeout "{{TIMEOUT}}"
+
+	echo ""
+	echo "==> Stage 2: Present"
+	"$JANITOR" report \
+	    --repo   "$REPO_DIR" \
+	    --top    50          \
+	    --format pdf         \
+	    --out    "$PDF_OUT"
+	echo "    PDF written: $PDF_OUT"
+
+	"$JANITOR" export \
+	    --repo "$REPO_DIR" \
+	    --out  "$CSV_OUT"
+	echo "    CSV written: $CSV_OUT"
+
+	echo ""
+	echo "══════════════════════════════════════════════════"
+	echo "  AUDIT COMPLETE — $REPO_SLUG"
+	echo "  PDF : $PDF_OUT"
+	echo "  CSV : $CSV_OUT"
+	echo "══════════════════════════════════════════════════"
 
 # 6. MULTI-REPO GAUNTLET
 # Deterministic Rust orchestrator replacing ultimate_gauntlet.sh.

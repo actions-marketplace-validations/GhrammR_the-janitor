@@ -2198,6 +2198,45 @@ fn cmd_bounce(
         }
     };
 
+    // Cross-PR structural clone detection (Swarm Clustering).
+    //
+    // Load all prior bounce log entries for this repo and build a fresh LshIndex.
+    // Query it with the current PR's MinHash signature at Jaccard threshold 0.85.
+    // Any matching entries represent PRs with >85% structural overlap — a strong
+    // signal of duplicate logic being introduced from different branches.
+    {
+        let janitor_dir_early = project_root.join(".janitor");
+        let prior_entries = report::load_bounce_log(&janitor_dir_early);
+        if !prior_entries.is_empty() && min_hashes_vec.len() == 64 {
+            // The current PR number as u32 for self-collision exclusion.
+            // Zero means unknown — only exclude when a real PR number is known.
+            let current_pr_u32 = pr_number.unwrap_or(0) as u32;
+            let index = forge::pr_collider::LshIndex::new();
+            for entry in &prior_entries {
+                if entry.min_hashes.len() == 64 {
+                    let entry_pr = entry.pr_number.unwrap_or(0) as u32;
+                    // Exclude entries for the current PR to prevent self-collision
+                    // (Ouroboros bug: PR matching itself at Jaccard 1.0).
+                    if current_pr_u32 != 0 && entry_pr == current_pr_u32 {
+                        continue;
+                    }
+                    if let Ok(arr) = entry.min_hashes.as_slice().try_into() {
+                        let sig = forge::pr_collider::PrDeltaSignature { min_hashes: arr };
+                        index.insert(sig, entry_pr);
+                    }
+                }
+            }
+            if let Ok(arr) = min_hashes_vec.as_slice().try_into() {
+                let current_sig = forge::pr_collider::PrDeltaSignature { min_hashes: arr };
+                score.collided_pr_numbers = index.query(&current_sig, 0.85);
+                // Exclude zero (daemon sentinel) and the current PR itself.
+                score
+                    .collided_pr_numbers
+                    .retain(|&n| n != 0 && n != current_pr_u32);
+            }
+        }
+    }
+
     // Local Adaptive Brain — suppress pardoned antipatterns and comment violations.
     //
     // Retains only findings whose suppression probability is below the threshold.
@@ -2244,6 +2283,7 @@ fn cmd_bounce(
             "comment_violation_details": score.comment_violation_details,
             "unlinked_pr": score.unlinked_pr,
             "hallucinated_security_fix": score.hallucinated_security_fix,
+            "collided_pr_numbers": score.collided_pr_numbers,
             "merkle_root": merkle_root,
             "gate_passed": gate_passed,
             "effective_gate": effective_gate,
@@ -2326,6 +2366,7 @@ fn cmd_bounce(
             .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
             .unwrap_or_default(),
         suppressed_by_domain: score.suppressed_by_domain,
+        collided_pr_numbers: score.collided_pr_numbers,
     };
     report::append_bounce_log(&janitor_dir, &log_entry);
 

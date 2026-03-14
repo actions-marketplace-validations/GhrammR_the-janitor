@@ -575,7 +575,9 @@ fn fetch_pr_list(repo_slug: &str, limit: usize) -> Result<Vec<PrMeta>, String> {
 
 /// Fetch the unified diff for `pr_number` from GitHub via `gh pr diff`.
 ///
-/// Returns raw patch bytes with vendor/binary hunks stripped.
+/// Returns raw patch bytes with only unparseable binary-extension hunks
+/// stripped.  Vendored directories (`thirdparty/`, `vendor/`, etc.) and test
+/// files are passed through so the engine's domain router can classify them.
 /// **The caller MUST hold [`git_lock()`] while this function executes.**
 fn fetch_diff(repo_slug: &str, pr_number: u64) -> Result<Vec<u8>, String> {
     let output = Command::new("gh")
@@ -587,25 +589,23 @@ fn fetch_diff(repo_slug: &str, pr_number: u64) -> Result<Vec<u8>, String> {
         return Err(format!("gh pr diff exited {}", output.status));
     }
 
-    Ok(strip_vendor_hunks(&output.stdout))
+    Ok(strip_binary_hunks(&output.stdout))
 }
 
-/// Strip vendor, thirdparty, and binary-extension hunks from a unified diff.
+/// Strip only binary-extension hunks from a unified diff.
 ///
-/// Mirrors the `awk` filter in `generate_client_package.sh` so both
-/// pipelines produce identical patch sets for the same PR.
-fn strip_vendor_hunks(patch: &[u8]) -> Vec<u8> {
+/// Vendored directories (`thirdparty/`, `vendor/`, etc.) are intentionally
+/// left in the patch so the engine's domain router can classify them correctly.
+/// Only truly unparseable binary blobs (images, compiled objects, archives)
+/// are dropped to prevent the tree-sitter parser from choking on binary bytes.
+fn strip_binary_hunks(patch: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(patch.len());
     let mut skip = false;
 
     for line in patch.split(|&b| b == b'\n') {
         if line.starts_with(b"diff --git ") {
             let s = String::from_utf8_lossy(line);
-            skip = s.contains("/thirdparty/")
-                || s.contains("/third_party/")
-                || s.contains("/vendor/")
-                || s.contains("/tests/")
-                || has_binary_extension(&s);
+            skip = has_binary_extension(&s);
         }
         if !skip {
             out.extend_from_slice(line);

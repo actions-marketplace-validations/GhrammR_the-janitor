@@ -354,10 +354,11 @@ pub mod unix {
                         // Cross-PR collision detection via LSH MinHash index.
                         let sig =
                             forge::pr_collider::PrDeltaSignature::from_bytes(patch.as_bytes());
-                        let near_matches = state.lsh_index.query(&sig, 0.8);
+                        let near_matches = state.lsh_index.query(&sig, 0.85);
                         score.logic_clones_found += near_matches.len() as u32;
-                        // Insert for future comparisons.
-                        state.lsh_index.insert(sig.clone());
+                        score.collided_pr_numbers = near_matches.clone();
+                        // Insert for future comparisons — daemon has no PR number context.
+                        state.lsh_index.insert(sig.clone(), 0);
 
                         // Persist to bounce_log.ndjson for `janitor report` aggregation.
                         // Daemon connections have no PR-number / author context — those
@@ -384,6 +385,7 @@ pub mod unix {
                             is_bot: false,
                             repo_slug: String::new(),
                             suppressed_by_domain: score.suppressed_by_domain,
+                            collided_pr_numbers: near_matches,
                         };
                         crate::report::append_bounce_log(&state.janitor_dir, &log_entry);
 

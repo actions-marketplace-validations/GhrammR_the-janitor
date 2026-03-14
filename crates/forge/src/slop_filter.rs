@@ -136,6 +136,16 @@ pub struct SlopScore {
     ///
     /// Does **not** contribute to [`Self::score()`].
     pub suppressed_by_domain: u32,
+
+    /// PR numbers of previously-seen patches whose MinHash Jaccard similarity ≥ 0.85
+    /// with this patch.
+    ///
+    /// Populated by `cmd_bounce` after querying the per-session [`LshIndex`].
+    /// Empty when no prior entries are in the bounce log or when running without
+    /// a populated MinHash index.
+    ///
+    /// Does **not** contribute to [`Self::score()`].
+    pub collided_pr_numbers: Vec<u32>,
 }
 
 impl SlopScore {

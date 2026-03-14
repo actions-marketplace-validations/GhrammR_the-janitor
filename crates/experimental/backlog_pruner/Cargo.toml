@@ -1,0 +1,16 @@
+[package]
+name = "backlog_pruner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tree-sitter.workspace = true
+blake3.workspace = true
+petgraph.workspace = true
+anyhow.workspace = true
+fips204 = "0.4"
+
+[dev-dependencies]
+tree-sitter-python.workspace = true

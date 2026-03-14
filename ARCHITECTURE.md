@@ -1,7 +1,7 @@
 # ARCHITECTURE.md
-**VERSION:** v6.12.5
-**DATE:** 2026-03-10
-**CONTEXT:** v6.12.5 — Tier-1 Grammar Expansion (Ruby, PHP, Swift, Lua); Automation Shield (4-layer bot classification); IaC Agnostic Shield Bypass; Universal Bot Shield (`app/` prefix detection); Governance Manifest (`janitor.toml`); Gauntlet Runner (22-repo deterministic orchestrator); Governor SaaS deployed on Fly.io (`the-governor.fly.dev`); 338 tests; 23 grammars.
+**VERSION:** v6.13.0
+**DATE:** 2026-03-14
+**CONTEXT:** v6.13.0 — Swarm Clustering (cross-PR LSH structural clone detection; `collided_pr_numbers` in BounceLogEntry); Ouroboros Hotfix (self-collision exclusion in LshIndex query); Ingestion Pipeline Purification (vendor-directory pre-filter removed; domain router receives raw diffs); UI Purification (governor Check Run expunges "Adaptive Brain"; LSH Integrity Score surfaced); Backlog Pruner experimental crate (`semantic_null`, `ghost_collision`, `unwired_island`; ML-DSA-65 manifest signing); 338 tests; 23 grammars.
 
 ---
 
@@ -195,13 +195,17 @@ File: `crates/forge/src/shadow_git.rs`
 - `simulate_merge(repo, base_oid, head_oid) -> Result<MergeSnapshot>` — pure in-memory merge simulation via libgit2. Zero disk checkout. O(PR-diff) not O(repo-size).
 - `iter_by_priority()` (Chemotaxis) — feeds high-slop-vector language files first: Python, JavaScript, TypeScript before C#, Go, etc.
 
-### 4.7 PR Collider (`LshIndex`)
+### 4.7 PR Collider & Swarm Clustering (`LshIndex`)
 
 File: `crates/forge/src/pr_collider.rs`
 
 - **Signature**: `PrDeltaSignature` — 64 MinHash values over byte 3-grams of the unified diff.
-- **Index**: `LshIndex` — 8 bands × 8 rows stored in `ArcSwap<HashMap>` for lock-free concurrent reads during daemon operation.
-- Hot-swappable without downtime via `arc-swap`.
+- **Index**: `LshIndex` — 8 bands × 8 rows stored in `ArcSwap<IndexSnapshot>` for lock-free concurrent reads. Each snapshot stores `signatures: Vec<PrDeltaSignature>` and `pr_numbers: Vec<u32>` as parallel arrays — `pr_numbers[i]` is the PR number that produced `signatures[i]`. `0` is the sentinel for daemon-mode entries where no PR number is available.
+- **`insert(sig, pr_number)`** — clone-and-swap of the full snapshot; O(n) cost; suitable for one-per-PR-bounce workloads.
+- **`query(sig, threshold) -> Vec<u32>`** — returns PR numbers of all stored signatures with Jaccard similarity ≥ `threshold`. Lock-free read guard.
+- **Swarm Clustering** (`cmd_bounce`): on each invocation, loads all prior `BounceLogEntry` records from `.janitor/bounce_log.ndjson`, rebuilds a fresh `LshIndex` in memory, and queries at Jaccard ≥ 0.85. Matching PR numbers are written to `SlopScore.collided_pr_numbers` and persisted in the log entry. Does not contribute to `score()`.
+- **Ouroboros Hotfix** (v6.13.0): prior log entries whose `pr_number` equals the current PR being evaluated are excluded from the index before the query — prevents self-collision at Jaccard 1.0.
+- **`just parallel-audit <owner/repo> [LIMIT] [TIMEOUT]`** is the unified engine for single-repo intelligence package generation: runs `parallel-bounce` across all PRs, appends to `.janitor/bounce_log.ndjson`, then invokes `janitor report --format pdf` + `janitor export` to produce the PDF and CSV deliverables.
 
 ### 4.8 Comment Scanner
 
@@ -705,4 +709,4 @@ Engineering constraints for correctness and minimal memory overhead. These are n
 ---
 
 **THE CODE IS THE ASSET. THE JANITOR IS THE FIDUCIARY.**
-**VERSION: v6.12.5**
+**VERSION: v6.13.0**

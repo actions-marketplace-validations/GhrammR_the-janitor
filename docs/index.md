@@ -6,7 +6,7 @@
 
 # The Janitor
 
-**v6.12.8 — Rust-Native. Zero-Copy. Structural Enforcement at the Gate.**
+**v6.13.0 — Rust-Native. Zero-Copy. Structural Determinism at the Gate.**
 
 ---
 
@@ -123,6 +123,20 @@ BLAKE3 structural hashing with alpha-normalization detects logic clones — func
 **Universal Bot Shield** — `is_automation_account()` applies a 4-layer classification before analysis: `app/` prefix (GitHub Apps), `[bot]` suffix, configurable `trusted_bot_authors`, and per-repo `[forge].automation_accounts` in `janitor.toml`. Bot PRs receive full structural analysis; no code is exempt from review.
 
 **Agnostic IaC Shield** — `ByteLatticeAnalyzer` detects binary blobs and high-entropy payloads (encrypted data, shellcode) injected into source patches. IaC file extensions (`.nix`, `.lock`, `.json`, `.toml`, `.yaml`, `.yml`, `.csv`) bypass the entropy gate — these formats contain legitimate high-density hashes (nix sha256, lockfile digests) that would otherwise produce false `AnomalousBlob` detections. Files above 7.0 bits/byte windowed entropy or containing null bytes are flagged regardless of extension.
+
+### Swarm Clustering
+
+Detects and mathematically clusters Agentic Swarm attacks using **64-bit Locality-Sensitive Hashing**. Every PR diff is sketched into a 64-component MinHash signature over byte 3-grams. The `LshIndex` (8 bands × 8 rows, ArcSwap lock-free) stores these signatures across the entire audit session. Any two patches with Jaccard similarity ≥ 0.85 are flagged as structural clones — instantly identifying **100% topological duplicates** across thousands of PRs.
+
+When the same LLM-generated change is submitted under different PR numbers from coordinated accounts, the Jaccard distance collapses to near-zero. Swarm Clustering catches this deterministically, without heuristics: the math either confirms structural identity or it does not. Colliding PR numbers are written into `collided_pr_numbers` in the bounce log and surfaced in the GitHub Check Run output.
+
+### Domain-Segregated Audit Engine
+
+**Bypasses vendored C/C++ libraries with zero-copy Aho-Corasick path routing, guaranteeing zero false positives on legitimate upstream CVE patches.**
+
+The Domain Router classifies every file blob in a PR diff before analysis begins. Blobs whose paths match vendored directory prefixes (`thirdparty/`, `third_party/`, `vendor/`) are assigned `DOMAIN_VENDORED` and routed through a dedicated analysis pass — memory-safety rules that would flag raw pointer arithmetic in application code are suppressed for vendored upstream C sources. This is the correct behaviour: a Godot Engine CVE patch touching `thirdparty/mbedtls/` is a legitimate security fix, not slop.
+
+Prior to v6.13.0, pipeline tools stripped vendored hunks from the diff before the engine ever saw them. The engine's domain router was starved of the blobs it needed to classify them correctly. The v6.13.0 ingestion pipeline purification removes all directory-based pre-filtering. Only unparseable binary-extension blobs (`.png`, `.so`, `.exe`, `.wasm`) are stripped before the engine. Everything else passes through raw so the domain router can make the correct call.
 
 ### The Reaper
 

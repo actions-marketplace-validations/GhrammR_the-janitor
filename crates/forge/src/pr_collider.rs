@@ -108,6 +108,10 @@ fn hash_shingle(shingle: &[u8], seed: u64) -> u64 {
 #[derive(Debug, Clone, Default)]
 struct IndexSnapshot {
     signatures: Vec<PrDeltaSignature>,
+    /// PR numbers parallel to `signatures` — `pr_numbers[i]` is the PR that
+    /// produced `signatures[i]`.  `0` is the sentinel for daemon-mode entries
+    /// where no PR number is available.
+    pr_numbers: Vec<u32>,
     /// Band buckets: `[band_index][bucket_key] = [signature_indices]`.
     buckets: Vec<HashMap<u64, Vec<usize>>>,
 }
@@ -116,6 +120,7 @@ impl IndexSnapshot {
     fn new() -> Self {
         Self {
             signatures: Vec::new(),
+            pr_numbers: Vec::new(),
             buckets: vec![HashMap::new(); NUM_BANDS],
         }
     }
@@ -137,16 +142,18 @@ impl LshIndex {
         }
     }
 
-    /// Insert a new [`PrDeltaSignature`] into the index.
+    /// Insert a new [`PrDeltaSignature`] into the index, tagged with `pr_number`.
     ///
+    /// `pr_number` is `0` when no PR context is available (daemon mode).
     /// Performs a full clone-and-swap of the snapshot — O(n) cost.
     /// Suitable for low-insert-rate workloads (one per PR bounce).
-    pub fn insert(&self, sig: PrDeltaSignature) {
+    pub fn insert(&self, sig: PrDeltaSignature, pr_number: u32) {
         let current = self.inner.load();
         let mut next = (**current).clone();
 
         let idx = next.signatures.len();
         next.signatures.push(sig.clone());
+        next.pr_numbers.push(pr_number);
 
         for band in 0..NUM_BANDS {
             let band_slice = &sig.min_hashes[band * ROWS_PER_BAND..(band + 1) * ROWS_PER_BAND];
@@ -159,9 +166,10 @@ impl LshIndex {
 
     /// Query for signatures with Jaccard similarity ≥ `threshold`.
     ///
-    /// Returns a list of indices into the internal signatures list.
+    /// Returns the PR numbers of matching entries (as supplied to [`insert`][Self::insert]).
+    /// `0` entries indicate daemon-mode inserts where no PR number was available.
     /// Lock-free: takes a read-only guard with no blocking.
-    pub fn query(&self, sig: &PrDeltaSignature, threshold: f64) -> Vec<usize> {
+    pub fn query(&self, sig: &PrDeltaSignature, threshold: f64) -> Vec<u32> {
         let snap = self.inner.load();
         if snap.signatures.is_empty() {
             return Vec::new();
@@ -177,10 +185,11 @@ impl LshIndex {
             }
         }
 
-        // Verify candidates with full Jaccard similarity.
+        // Verify candidates with full Jaccard similarity; return their PR numbers.
         candidates
             .into_iter()
             .filter(|&i| jaccard_similarity(&snap.signatures[i], sig) >= threshold)
+            .map(|i| snap.pr_numbers[i])
             .collect()
     }
 
@@ -266,22 +275,23 @@ mod tests {
 
         let patch = b"def add(a, b):\n    return a + b\n";
         let sig = PrDeltaSignature::from_bytes(patch);
-        index.insert(sig.clone());
+        index.insert(sig.clone(), 42);
         assert_eq!(index.len(), 1);
 
-        // Query with the same signature should find itself.
+        // Query with the same signature should find itself and return its PR number.
         let results = index.query(&sig, 0.9);
         assert!(
             !results.is_empty(),
             "query for inserted signature must return a hit"
         );
+        assert_eq!(results[0], 42, "query must return the inserted PR number");
     }
 
     #[test]
     fn test_empty_input_does_not_panic() {
         let sig = PrDeltaSignature::from_bytes(&[]);
         let index = LshIndex::new();
-        index.insert(sig.clone());
+        index.insert(sig.clone(), 0);
         let results = index.query(&sig, 0.5);
         // Empty signatures may or may not match — just verify no panic.
         let _ = results;

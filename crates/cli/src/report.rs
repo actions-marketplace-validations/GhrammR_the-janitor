@@ -165,6 +165,14 @@ pub struct BounceLogEntry {
     /// Always `0` for log entries written before this field was introduced.
     #[serde(default)]
     pub suppressed_by_domain: u32,
+
+    /// PR numbers of prior bounced patches whose MinHash Jaccard similarity ≥ 0.85
+    /// with this patch — indicating structural clone overlap.
+    ///
+    /// Populated by `cmd_bounce` after querying the bounce log LshIndex.
+    /// Empty for log entries written before this field was introduced.
+    #[serde(default)]
+    pub collided_pr_numbers: Vec<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +418,10 @@ fn detect_clone_pairs(entries: &[BounceLogEntry], threshold: f64) -> Vec<(usize,
         if entry.min_hashes.len() == 64 {
             let mut arr = [0u64; 64];
             arr.copy_from_slice(&entry.min_hashes);
-            index.insert(PrDeltaSignature { min_hashes: arr });
+            // Use the lsh position (sequential insert counter) as the "pr_number"
+            // tag so query() returns positions we can use to index valid_indices.
+            let lsh_pos = valid_indices.len() as u32;
+            index.insert(PrDeltaSignature { min_hashes: arr }, lsh_pos);
             valid_indices.push(i);
         }
     }
@@ -421,8 +432,10 @@ fn detect_clone_pairs(entries: &[BounceLogEntry], threshold: f64) -> Vec<(usize,
         let mut arr = [0u64; 64];
         arr.copy_from_slice(&entries[entry_i].min_hashes);
         let sig = PrDeltaSignature { min_hashes: arr };
+        // query() returns Vec<u32> of the lsh positions stored at insert time.
         let candidates = index.query(&sig, threshold);
-        for lsh_j in candidates {
+        for lsh_j_u32 in candidates {
+            let lsh_j = lsh_j_u32 as usize;
             // Guard against out-of-bounds (should not occur, but defensive).
             let Some(&entry_j) = valid_indices.get(lsh_j) else {
                 continue;

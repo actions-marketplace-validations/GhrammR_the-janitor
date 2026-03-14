@@ -101,7 +101,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 The Software modifies source files. You are solely responsible for maintaining version control and backups. The shadow-tree simulation and ghost-backup protocol are provided as a safety mechanism but do not constitute a warranty against data loss.
 
-Automated static analysis is inherently probabilistic. The Janitor cannot guarantee zero false positives or zero false negatives. All cleanup operations should be reviewed by a qualified engineer before deployment to production environments.
+Automated static analysis produces deterministic results bounded by the completeness of its symbol reference graph. The Janitor cannot guarantee zero false positives or zero false negatives across all possible language constructs and project configurations. All cleanup operations should be reviewed by a qualified engineer before deployment to production environments.
 
 ---
 
