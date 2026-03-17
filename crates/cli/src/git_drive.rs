@@ -236,6 +236,8 @@ fn collect_pr_refs(repo_path: &Path, limit: usize) -> Result<Vec<(u32, String)>>
 /// 11. `refs/heads/canary`
 /// 12. `refs/remotes/origin/unstable` (Redis)
 /// 13. `refs/heads/unstable`
+/// 14. `refs/remotes/origin/devel`    (kernel.org / freedesktop projects)
+/// 15. `refs/heads/devel`
 fn find_base_sha(repo_path: &Path, base_branch: Option<&str>) -> Result<String> {
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow!("Cannot open repository for base resolution: {e}"))?;
@@ -259,6 +261,8 @@ fn find_base_sha(repo_path: &Path, base_branch: Option<&str>) -> Result<String> 
             "refs/heads/canary".to_string(),
             "refs/remotes/origin/unstable".to_string(),
             "refs/heads/unstable".to_string(),
+            "refs/remotes/origin/devel".to_string(),
+            "refs/heads/devel".to_string(),
         ]
     };
 
