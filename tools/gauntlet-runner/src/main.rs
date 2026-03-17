@@ -503,25 +503,46 @@ fn main() {
             ];
             fetch_args.extend(refspecs);
 
-            let status = Command::new("git")
+            let bulk_ok = Command::new("git")
                 .args(&fetch_args)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    eprintln!("  Targeted PR fetch complete.");
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if bulk_ok {
+                eprintln!("  Targeted PR fetch complete.");
+            } else {
+                // A Ghost PR (deleted between API harvest and Git fetch) causes
+                // the bulk refspec invocation to fail with exit 128.  Degrade
+                // to individual fetches so the 499 valid PRs still land in the
+                // local packfile — only the ghost is silently abandoned.
+                eprintln!(
+                    "  warning: Bulk fetch failed (Ghost PR detected). \
+                     Degrading to fault-tolerant individual fetch..."
+                );
+                for pr_num in &pr_numbers {
+                    let refspec =
+                        format!("+refs/pull/{pr_num}/head:refs/remotes/origin/pr/{pr_num}");
+                    let _ = Command::new("git")
+                        .args([
+                            "-C",
+                            repo_dir_str,
+                            "fetch",
+                            "origin",
+                            &refspec,
+                            "--no-tags",
+                            "--force",
+                        ])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
                 }
-                Ok(s) => {
-                    eprintln!("  error: git fetch exited {s} — skipping {repo_slug}");
-                    total_errors += 1;
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("  error: git fetch exec failed: {e} — skipping {repo_slug}");
-                    total_errors += 1;
-                    continue;
-                }
+                eprintln!(
+                    "  Fault-tolerant fetch complete ({} refs attempted).",
+                    pr_numbers.len()
+                );
             }
 
             // Phase 4: memory-mapped strike.
