@@ -265,7 +265,7 @@ fn find_python_slop(eng: &QueryEngine, source: &[u8]) -> Vec<SlopFinding> {
                 }
                 let imported_names = extract_imported_names(child, source);
                 for name in imported_names {
-                    if !is_name_used_in_body(body.node, source, &name) {
+                    if !is_name_used_in_body(body.node, source, &name, &mut findings) {
                         findings.push(SlopFinding {
                             start_byte: child.start_byte(),
                             end_byte: child.end_byte(),
@@ -359,26 +359,44 @@ fn extract_imported_names(import_node: Node<'_>, source: &[u8]) -> Vec<String> {
 
 /// Check if `name` is used as an identifier anywhere in `body_node`,
 /// excluding the import statements themselves.
-fn is_name_used_in_body(body_node: Node<'_>, source: &[u8], name: &str) -> bool {
-    identifier_used_recursive(body_node, source, name)
-}
+///
+/// Iterative (stack-based) traversal — never recurses.  Aborts at depth > 512
+/// and pushes a `security:ast_bomb_anomaly` finding to prevent stack overflow
+/// on pathologically deep ASTs (AST-Bomb DoS).
+fn is_name_used_in_body(
+    body_node: Node<'_>,
+    source: &[u8],
+    name: &str,
+    findings: &mut Vec<SlopFinding>,
+) -> bool {
+    // Stack entries: (node, depth).
+    let mut stack: Vec<(Node<'_>, u32)> = Vec::with_capacity(64);
+    stack.push((body_node, 0));
 
-fn identifier_used_recursive(node: Node<'_>, source: &[u8], name: &str) -> bool {
-    // Skip import nodes — they define the name, not use it.
-    if node.kind() == "import_statement" || node.kind() == "import_from_statement" {
-        return false;
-    }
-    if node.kind() == "identifier" {
-        if let Ok(text) = node.utf8_text(source) {
-            if text == name {
-                return true;
+    while let Some((node, depth)) = stack.pop() {
+        if depth > 512 {
+            findings.push(SlopFinding {
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+                description: "security:ast_bomb_anomaly".to_string(),
+                domain: DOMAIN_FIRST_PARTY,
+            });
+            return false; // Abort traversal safely.
+        }
+        // Skip import nodes — they define the name, not use it.
+        if node.kind() == "import_statement" || node.kind() == "import_from_statement" {
+            continue;
+        }
+        if node.kind() == "identifier" {
+            if let Ok(text) = node.utf8_text(source) {
+                if text == name {
+                    return true;
+                }
             }
         }
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if identifier_used_recursive(child, source, name) {
-            return true;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push((child, depth + 1));
         }
     }
     false
@@ -641,7 +659,7 @@ fn walk_yaml_document(doc_node: Node<'_>, source: &[u8], findings: &mut Vec<Slop
         // `hosts` may appear at top-level (Gateway) or inside `spec` (VirtualService/Ingress).
         // We accept `hosts` at any depth by recursively scanning `spec`.
         if key_text == "hosts" {
-            if let Some(start) = find_wildcard_in_sequence(pair, source) {
+            if let Some(start) = find_wildcard_in_sequence(pair, source, findings) {
                 findings.push(SlopFinding {
                     start_byte: start,
                     end_byte: start + 1,
@@ -662,7 +680,8 @@ fn walk_yaml_document(doc_node: Node<'_>, source: &[u8], findings: &mut Vec<Slop
                         continue;
                     }
                     if pair_key_text(inner_pair, source).as_deref() == Some("hosts") {
-                        if let Some(start) = find_wildcard_in_sequence(inner_pair, source) {
+                        if let Some(start) = find_wildcard_in_sequence(inner_pair, source, findings)
+                        {
                             findings.push(SlopFinding {
                                 start_byte: start,
                                 end_byte: start + 1,
@@ -746,26 +765,42 @@ fn find_first_block_mapping(node: Node<'_>) -> Option<Node<'_>> {
 
 /// Search a `block_mapping_pair`'s value for a sequence item whose scalar is `*`.
 /// Returns the start byte of the wildcard item when found.
-fn find_wildcard_in_sequence(pair: Node<'_>, source: &[u8]) -> Option<usize> {
-    find_wildcard_recursive(pair, source)
-}
+///
+/// Iterative (stack-based) traversal — never recurses.  Aborts at depth > 512
+/// and pushes a `security:ast_bomb_anomaly` finding to prevent stack overflow.
+fn find_wildcard_in_sequence(
+    pair: Node<'_>,
+    source: &[u8],
+    findings: &mut Vec<SlopFinding>,
+) -> Option<usize> {
+    let mut stack: Vec<(Node<'_>, u32)> = Vec::with_capacity(32);
+    stack.push((pair, 0));
 
-fn find_wildcard_recursive(node: Node<'_>, source: &[u8]) -> Option<usize> {
-    // Check if this node is a scalar with value `*`.
-    if matches!(
-        node.kind(),
-        "string_scalar" | "plain_scalar" | "double_quote_scalar" | "single_quote_scalar"
-    ) {
-        let text = node.utf8_text(source).ok()?;
-        let trimmed = text.trim_matches('"').trim_matches('\'');
-        if trimmed == "*" {
-            return Some(node.start_byte());
+    while let Some((node, depth)) = stack.pop() {
+        if depth > 512 {
+            findings.push(SlopFinding {
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+                description: "security:ast_bomb_anomaly".to_string(),
+                domain: DOMAIN_FIRST_PARTY,
+            });
+            return None; // Abort traversal safely.
         }
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(pos) = find_wildcard_recursive(child, source) {
-            return Some(pos);
+        // Check if this node is a scalar with value `*`.
+        if matches!(
+            node.kind(),
+            "string_scalar" | "plain_scalar" | "double_quote_scalar" | "single_quote_scalar"
+        ) {
+            if let Ok(text) = node.utf8_text(source) {
+                let trimmed = text.trim_matches('"').trim_matches('\'');
+                if trimmed == "*" {
+                    return Some(node.start_byte());
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push((child, depth + 1));
         }
     }
     None

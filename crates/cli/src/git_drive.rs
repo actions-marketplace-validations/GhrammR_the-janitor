@@ -228,6 +228,10 @@ fn collect_pr_refs(repo_path: &Path, limit: usize) -> Result<Vec<(u32, String)>>
 /// 3. `refs/remotes/origin/main`
 /// 4. `refs/heads/master`
 /// 5. `refs/heads/main`
+/// 6. `refs/remotes/origin/trunk`  (Apache projects)
+/// 7. `refs/heads/trunk`
+/// 8. `refs/remotes/origin/develop` (Gitflow convention)
+/// 9. `refs/heads/develop`
 fn find_base_sha(repo_path: &Path, base_branch: Option<&str>) -> Result<String> {
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow!("Cannot open repository for base resolution: {e}"))?;
@@ -243,6 +247,10 @@ fn find_base_sha(repo_path: &Path, base_branch: Option<&str>) -> Result<String> 
             "refs/remotes/origin/main".to_string(),
             "refs/heads/master".to_string(),
             "refs/heads/main".to_string(),
+            "refs/remotes/origin/trunk".to_string(),
+            "refs/heads/trunk".to_string(),
+            "refs/remotes/origin/develop".to_string(),
+            "refs/heads/develop".to_string(),
         ]
     };
 

@@ -412,6 +412,15 @@ enum TelemetryCmd {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Initialise the global Rayon thread pool with an 8 MB stack per worker so
+    // deep tree-sitter ASTs (e.g. rust-lang/rust compiler test suites) do not
+    // overflow the default 2 MB stack when traversals approach the 512-depth
+    // abort limit.  unwrap_or(()) — a pre-existing global pool is benign.
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(8 * 1024 * 1024)
+        .build_global()
+        .unwrap_or(());
+
     if let Err(e) = dotenvy::dotenv() {
         eprintln!("warning: .env: {e}");
     }
