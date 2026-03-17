@@ -244,6 +244,7 @@ hyper-gauntlet *ARGS:
 	    exec nix develop --command just hyper-gauntlet {{ARGS}}
 	fi
 	cargo build --release -p gauntlet-runner -p cli
+	rm -rf ~/dev/gauntlet/* || true
 	./target/release/gauntlet-runner --hyper --pr-limit 5000 {{ARGS}}
 
 # 7. HYPER-DRIVE — libgit2 O(N) local PR batch bouncer (zero network after clone)

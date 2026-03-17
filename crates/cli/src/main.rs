@@ -1455,10 +1455,32 @@ fn cmd_dashboard(project_root: &Path) -> anyhow::Result<()> {
     let rkyv_path = project_root.join(".janitor").join("symbols.rkyv");
 
     if !rkyv_path.exists() {
-        println!(
-            "No symbol registry found. Run `janitor scan {}` first.",
-            project_root.display()
+        eprintln!(
+            "warning: No symbol registry found at {}. Bypassing symbol-graph view.",
+            rkyv_path.display()
         );
+        // Degraded mode: load bounce log and print PR telemetry summary.
+        let janitor_dir = project_root.join(".janitor");
+        let entries = crate::report::load_bounce_log(&janitor_dir);
+        if entries.is_empty() {
+            eprintln!(
+                "No bounce log found either. Run `janitor scan {}` or \
+                 `janitor bounce` to populate data.",
+                project_root.display()
+            );
+        } else {
+            let total = entries.len();
+            let flagged = entries.iter().filter(|e| e.slop_score >= 100).count();
+            let top_score = entries.iter().map(|e| e.slop_score).max().unwrap_or(0);
+            println!("── PR Telemetry (bounce log) ──────────────────────────────");
+            println!("  Total PRs audited : {total}");
+            println!("  Flagged (≥100 pts): {flagged}");
+            println!("  Highest score     : {top_score}");
+            println!(
+                "  (Run `janitor scan {path}` to enable the full symbol-graph TUI.)",
+                path = project_root.display()
+            );
+        }
         return Ok(());
     }
 

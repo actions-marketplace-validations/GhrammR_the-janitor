@@ -522,7 +522,10 @@ fn main() {
                     "  warning: Bulk fetch failed (Ghost PR detected). \
                      Degrading to fault-tolerant individual fetch..."
                 );
-                for pr_num in &pr_numbers {
+                let total = pr_numbers.len();
+                for (idx, pr_num) in pr_numbers.iter().enumerate() {
+                    let current = idx + 1;
+                    eprintln!("  [Fallback] Fetching PR {current}/{total}...");
                     let refspec =
                         format!("+refs/pull/{pr_num}/head:refs/remotes/origin/pr/{pr_num}");
                     let _ = Command::new("git")
