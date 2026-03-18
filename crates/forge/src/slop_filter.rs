@@ -25,8 +25,10 @@
 //! ## Scoring Formula
 //! ```text
 //! SlopScore = (dead_symbols_added × 10) + (logic_clones_found × 5)
-//!           + (zombie_symbols_added × 15) + (antipatterns_found × 50)
+//!           + (zombie_symbols_added × 15) + (antipatterns_found.min(10) × 50)
 //!           + (hallucinated_security_fix × 100)
+//! `antipatterns_found` is capped at 10 per PR to prevent runaway inflation
+//! from generated FFI bindings or large auto-templated files.
 //! ```
 //! Dead-symbol additions (×10) penalise name-based re-introduction.
 //! Logic clones (×5) penalise structural duplication within the patch (exact BLAKE3 or fuzzy
@@ -55,7 +57,7 @@ use common::registry::SymbolRegistry;
 /// score = (dead_symbols_added      × 10)
 ///       + (logic_clones_found      ×  5)
 ///       + (zombie_symbols_added    × 15)
-///       + (antipatterns_found      × 50)
+///       + (antipatterns_found.min(10) × 50)   — capped at 10 per PR
 ///       + (comment_violations      ×  5)
 ///       + (unlinked_pr             × 20)
 ///       + (hallucinated_security_fix × 100)
@@ -169,10 +171,15 @@ impl SlopScore {
         // pairs is already conclusively slop at 250 points; the ceiling adds
         // no information beyond that.
         let clamped_clones = self.logic_clones_found.min(50);
+        // Clamp antipatterns_found to 10 to prevent score explosion from
+        // generated FFI bindings or large auto-templated files that legitimately
+        // use the same pattern hundreds of times (e.g. Godot C++ allocations,
+        // bindgen output).  10 antipatterns × 50 = 500 pts maximum contribution.
+        let clamped_antipatterns = self.antipatterns_found.min(10);
         self.dead_symbols_added * 10
             + clamped_clones * 5
             + self.zombie_symbols_added * 15
-            + self.antipatterns_found * 50
+            + clamped_antipatterns * 50
             + self.comment_violations * 5
             + self.unlinked_pr * 20
             + self.hallucinated_security_fix * 100
@@ -1213,32 +1220,30 @@ mod tests {
         );
     }
 
+    // C++ raw new/delete rule was removed in v7.1.11.
+    // These integration tests verify the end-to-end pipeline produces zero
+    // antipattern findings for C++ new expressions (regression guard).
+
     #[test]
-    fn test_vendored_cpp_raw_new_suppressed_by_domain() {
-        // A `new` expression in vendor/ must NOT fire the C++ antipattern rule —
-        // the DOMAIN_FIRST_PARTY mask on that rule is filtered out for DOMAIN_VENDORED files.
+    fn test_vendored_cpp_raw_new_not_flagged() {
         let src = "void* p = new MyClass();\n";
         let patch = make_patch("vendor/somelib/src/alloc.cpp", src);
         let score = PatchBouncer.bounce(&patch, &empty_registry()).unwrap();
         assert_eq!(
             score.antipatterns_found, 0,
-            "raw new in vendor/ must be domain-suppressed"
+            "C++ raw new must not fire (rule removed v7.1.11)"
         );
-        assert_eq!(
-            score.suppressed_by_domain, 1,
-            "suppressed_by_domain must record the withheld finding"
-        );
+        assert_eq!(score.suppressed_by_domain, 0);
     }
 
     #[test]
-    fn test_first_party_cpp_raw_new_fires() {
-        // The same `new` expression in first-party code must still be flagged.
+    fn test_first_party_cpp_raw_new_not_flagged() {
         let src = "void* p = new MyClass();\n";
         let patch = make_patch("src/engine/alloc.cpp", src);
         let score = PatchBouncer.bounce(&patch, &empty_registry()).unwrap();
         assert_eq!(
-            score.antipatterns_found, 1,
-            "raw new in first-party src/ must fire"
+            score.antipatterns_found, 0,
+            "C++ raw new must not fire in first-party code either (rule removed v7.1.11)"
         );
         assert_eq!(score.suppressed_by_domain, 0);
     }

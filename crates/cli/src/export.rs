@@ -491,5 +491,31 @@ fn build_violation_reasons(entry: &crate::report::BounceLogEntry) -> String {
         }
     }
 
-    reasons.join(" | ")
+    // ── Deduplicate: count identical strings, preserving first-occurrence order ─
+    // A single PR may trigger the same antipattern (e.g. "Vacuous unsafe block")
+    // hundreds of times in a large FFI codebase, blowing out the CSV cell.
+    // Collapse these into "Description (xN)" to keep the column readable.
+    let mut counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::with_capacity(reasons.len());
+    let mut ordered: Vec<String> = Vec::with_capacity(reasons.len());
+    for r in reasons {
+        let entry = counts.entry(r.clone()).or_insert(0);
+        if *entry == 0 {
+            ordered.push(r);
+        }
+        *entry += 1;
+    }
+    let deduped: Vec<String> = ordered
+        .into_iter()
+        .map(|r| {
+            let count = counts[&r];
+            if count > 1 {
+                format!("{r} (x{count})")
+            } else {
+                r
+            }
+        })
+        .collect();
+
+    deduped.join(" | ")
 }

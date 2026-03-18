@@ -15,7 +15,6 @@
 //! | Java     | Empty catch block | `catch (E e) {}` — silently swallows exceptions |
 //! | Java     | `System.out.println` | Console debug logging leaking to production |
 //! | C#       | `async void` method | Cannot be awaited; unhandled exceptions crash the process |
-//! | C++      | Raw `new`/`delete` | Manual memory management instead of RAII smart pointers |
 //! | Bash     | Unquoted variable | `$VAR` without quotes — word-splitting and glob-expansion hazard |
 //! | JavaScript | `eval()` call | Executes arbitrary code from a string — code injection risk |
 //! | TypeScript | `eval()` call | Same as JavaScript |
@@ -82,10 +81,6 @@ const JAVA_SLOP_QUERY: &str = include_str!("../queries/java.scm");
 /// Loaded from `queries/c_sharp.scm` — embedded at compile time.
 const CSHARP_SLOP_QUERY: &str = include_str!("../queries/c_sharp.scm");
 
-/// C++: raw `new` and `delete` expressions.
-/// Loaded from `queries/cpp.scm` — embedded at compile time.
-const CPP_SLOP_QUERY: &str = include_str!("../queries/cpp.scm");
-
 /// Bash: unquoted variable expansions as command arguments.
 /// Loaded from `queries/bash.scm` — embedded at compile time.
 const BASH_SLOP_QUERY: &str = include_str!("../queries/bash.scm");
@@ -123,8 +118,6 @@ struct QueryEngine {
     java_query: Query,
     csharp_lang: Language,
     csharp_query: Query,
-    cpp_lang: Language,
-    cpp_query: Query,
     bash_lang: Language,
     bash_query: Query,
     /// JavaScript/JSX — AST walk, no query needed.
@@ -158,10 +151,6 @@ impl QueryEngine {
         let csharp_query = Query::new(&csharp_lang, CSHARP_SLOP_QUERY)
             .map_err(|e| anyhow::anyhow!("slop_hunter: C# query error: {e}"))?;
 
-        let cpp_lang: Language = tree_sitter_cpp::LANGUAGE.into();
-        let cpp_query = Query::new(&cpp_lang, CPP_SLOP_QUERY)
-            .map_err(|e| anyhow::anyhow!("slop_hunter: C++ query error: {e}"))?;
-
         let bash_lang: Language = tree_sitter_bash::LANGUAGE.into();
         let bash_query = Query::new(&bash_lang, BASH_SLOP_QUERY)
             .map_err(|e| anyhow::anyhow!("slop_hunter: Bash query error: {e}"))?;
@@ -182,8 +171,6 @@ impl QueryEngine {
             java_query,
             csharp_lang,
             csharp_query,
-            cpp_lang,
-            cpp_query,
             bash_lang,
             bash_query,
             js_lang,
@@ -458,7 +445,8 @@ fn contains_unsafe_operations(block_node: Node<'_>, source: &[u8]) -> bool {
     let text = &source[start..end];
 
     // Patterns that legitimately require unsafe:
-    // raw pointer dereferences, extern blocks, inline/global assembly, mutable statics.
+    // raw pointer dereferences, extern blocks, inline/global assembly, mutable statics,
+    // and common FFI crate prefixes (libc, sys, winapi, nix, ffi modules).
     const UNSAFE_INDICATORS: &[&[u8]] = &[
         b"*mut ",
         b"*const ",
@@ -471,6 +459,13 @@ fn contains_unsafe_operations(block_node: Node<'_>, source: &[u8]) -> bool {
         b"from_raw(",
         b"as_mut_ptr()",
         b"as_ptr()",
+        // FFI crate / module call patterns — a block calling into any of these
+        // is performing FFI and must not be flagged as vacuous.
+        b"libc::",
+        b"winapi::",
+        b"nix::",
+        b"ffi::",
+        b"sys::",
     ];
 
     if UNSAFE_INDICATORS
@@ -983,47 +978,17 @@ fn find_method_name(node: Node<'_>, source: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// C++: raw new / delete
+// C++: raw new / delete — RULE REMOVED (v7.1.11)
+//
+// Systems programming and game engines (Godot, Unreal, custom allocators)
+// require manual memory management.  The raw new/delete rule produced
+// thousands of false-positive findings per PR in these codebases, inflating
+// scores to 10 000+ points and drowning out genuine signals.
+// The rule is retained as a stub so the grammar machinery stays exercised.
 // ---------------------------------------------------------------------------
 
-fn find_cpp_slop(eng: &QueryEngine, source: &[u8]) -> Vec<SlopFinding> {
-    let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&eng.cpp_lang).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(source, None) else {
-        return Vec::new();
-    };
-
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&eng.cpp_query, tree.root_node(), source);
-    let cap_names = eng.cpp_query.capture_names();
-
-    let mut findings = Vec::new();
-
-    while let Some(m) = matches.next() {
-        for cap in m.captures.iter() {
-            let description = match cap_names[cap.index as usize] {
-                "raw_new" => {
-                    "Raw `new`: prefer std::make_unique<T>() or std::make_shared<T>() \
-                              for exception-safe RAII ownership"
-                }
-                "raw_delete" => {
-                    "Raw `delete`: manual memory management is error-prone — \
-                                 let unique_ptr/shared_ptr handle deallocation"
-                }
-                _ => continue,
-            };
-            findings.push(SlopFinding {
-                start_byte: cap.node.start_byte(),
-                end_byte: cap.node.end_byte(),
-                description: description.to_string(),
-                domain: DOMAIN_FIRST_PARTY,
-            });
-        }
-    }
-
-    findings
+fn find_cpp_slop(_eng: &QueryEngine, _source: &[u8]) -> Vec<SlopFinding> {
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -1490,8 +1455,12 @@ public class Handler {
     // C++ tests
     // -----------------------------------------------------------------------
 
+    // C++ raw new/delete rule was removed in v7.1.11 — game engines and systems
+    // code require manual memory management; the rule caused mass false positives.
+    // These tests verify the rule is gone (regression guard against re-adding it).
+
     #[test]
-    fn test_cpp_raw_new_detected() {
+    fn test_cpp_raw_new_not_flagged() {
         let src = b"\
 #include <string>
 void foo() {
@@ -1500,31 +1469,23 @@ void foo() {
 }
 ";
         let findings = find_slop("cpp", src);
-        let new_findings: Vec<_> = findings
-            .iter()
-            .filter(|f| f.description.contains("new"))
-            .collect();
         assert!(
-            !new_findings.is_empty(),
-            "raw new must be detected: {findings:?}"
+            findings.is_empty(),
+            "C++ raw new must NOT be flagged (rule removed v7.1.11): {findings:?}"
         );
     }
 
     #[test]
-    fn test_cpp_raw_delete_detected() {
+    fn test_cpp_raw_delete_not_flagged() {
         let src = b"\
 void foo(int* p) {
     delete p;
 }
 ";
         let findings = find_slop("cpp", src);
-        let del_findings: Vec<_> = findings
-            .iter()
-            .filter(|f| f.description.contains("delete"))
-            .collect();
         assert!(
-            !del_findings.is_empty(),
-            "raw delete must be detected: {findings:?}"
+            findings.is_empty(),
+            "C++ raw delete must NOT be flagged (rule removed v7.1.11): {findings:?}"
         );
     }
 
