@@ -35,6 +35,7 @@ use anyhow::{anyhow, Result};
 use git2::{Oid, Repository};
 use rayon::prelude::*;
 
+use common::physarum::{Pulse, SystemHeart};
 use common::registry::{MappedRegistry, SymbolRegistry};
 use forge::slop_filter::bounce_git;
 use include_deflator::graph::IncludeGraphBuilder;
@@ -124,6 +125,10 @@ pub fn cmd_hyper_drive(
     let processed = AtomicUsize::new(0);
     let written = AtomicUsize::new(0);
 
+    // Physarum Protocol — shared RAM-pressure sensor for all rayon workers.
+    // Workers spin-wait on Stop (>90% RAM) before entering the AST pipeline.
+    let heart = Arc::new(SystemHeart::new());
+
     // Cap at 4 threads — each worker opens its own git2::Repository handle
     // and may buffer up to 1 MiB of blob data.  4 × 1 MiB = 4 MiB peak
     // anonymous heap; well within budget on any target machine.
@@ -135,6 +140,13 @@ pub fn cmd_hyper_drive(
 
     pool.install(|| {
         pr_entries.par_iter().for_each(|(pr_num, pr_sha)| {
+            // Physarum Protocol — RAM backpressure gate.
+            // Spin on Stop (>90%); proceed immediately on Constrict or Flow.
+            while let Pulse::Stop = heart.beat() {
+                eprintln!("  [PHYSARUM] RAM >90%. Worker pausing...");
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+
             let entry = bounce_one(repo_path_arc, &base_sha, pr_sha, &registry, *pr_num, &slug);
             let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
             eprintln!(
@@ -464,8 +476,11 @@ fn bounce_one(
 // WOPR graph builder
 // ---------------------------------------------------------------------------
 
-/// Scan `repo_path` for C/C++ `#include` relationships and return the top-10
-/// nodes by transitive reach, pre-ranked for the WOPR dashboard.
+/// Walk the `HEAD` tree of `repo_path` in-memory for C/C++ `#include` relationships
+/// and return the top-10 nodes by transitive reach, pre-ranked for the WOPR dashboard.
+///
+/// Uses `git2` blob access so this works even when the orchestrator checked out no
+/// working tree (`--no-checkout`) or after Scorched Earth deleted the source files.
 ///
 /// Serialized to `.janitor/wopr_graph.json` by [`cmd_hyper_drive`] after the
 /// bounce run completes.  The WOPR dashboard loads this file instead of
@@ -475,8 +490,10 @@ fn bounce_one(
 /// Returns an empty `Vec` when no C/C++ files are found — the dashboard
 /// displays `"AWAITING HYPER-DRIVE GRAPH GENERATION..."` in that case.
 fn build_wopr_graph(repo_path: &Path) -> Result<Vec<(String, usize, usize)>> {
+    let repo = Repository::open(repo_path)
+        .map_err(|e| anyhow!("Cannot open git repository for WOPR graph: {e}"))?;
     let mut builder = IncludeGraphBuilder::new();
-    let _ = builder.scan_dir(repo_path);
+    let _ = builder.scan_repo(&repo);
     let graph = builder.build();
 
     let n = graph.node_count();

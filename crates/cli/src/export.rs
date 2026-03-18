@@ -139,7 +139,11 @@ pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
             let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
             let author_str = csv_sanitize(entry.author.as_deref().unwrap_or(""));
             let score_str = entry.slop_score.to_string();
-            let unlinked_str = entry.unlinked_pr.to_string();
+            let unlinked_str = if entry.unlinked_pr > 0 {
+                "TRUE"
+            } else {
+                "FALSE"
+            };
             let dead_str = entry.dead_symbols_added.to_string();
             let clones_str = entry.logic_clones_found.min(50).to_string();
             let zombie_syms_str = entry.zombie_symbols_added.to_string();
@@ -156,7 +160,7 @@ pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
                 score_str.as_str(),
                 "FALSE",
                 "0",
-                unlinked_str.as_str(),
+                unlinked_str, // Unlinked_PR — boolean TRUE/FALSE
                 dead_str.as_str(),
                 clones_str.as_str(),
                 zombie_syms_str.as_str(),
@@ -239,9 +243,13 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
         let author_str = csv_sanitize(entry.author.as_deref().unwrap_or(""));
         let score_str = entry.slop_score.to_string();
-        let unlinked_str = entry.unlinked_pr.to_string();
+        let unlinked_str = if entry.unlinked_pr > 0 {
+            "TRUE"
+        } else {
+            "FALSE"
+        };
         let dead_str = entry.dead_symbols_added.to_string();
-        let clones_str = entry.logic_clones_found.to_string();
+        let clones_str = entry.logic_clones_found.min(50).to_string();
         let zombie_syms_str = entry.zombie_symbols_added.to_string();
         let zombie_deps_str = csv_sanitize(&entry.zombie_deps.join(" | "));
         let violation_reasons = csv_sanitize(&build_violation_reasons(entry));
@@ -254,9 +262,9 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
             pr_num_str.as_str(),
             author_str.as_str(),
             score_str.as_str(),
-            "FALSE", // Mesa_Triggered — SaaS reserved
-            "0",     // Trust_Delta   — SaaS reserved
-            unlinked_str.as_str(),
+            "FALSE",      // Mesa_Triggered — SaaS reserved
+            "0",          // Trust_Delta   — SaaS reserved
+            unlinked_str, // Unlinked_PR   — boolean TRUE/FALSE
             dead_str.as_str(),
             clones_str.as_str(),
             zombie_syms_str.as_str(),

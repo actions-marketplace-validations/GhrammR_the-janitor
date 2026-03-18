@@ -95,9 +95,11 @@ fn log_active(log_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Scan `base_dir` for cloned repositories (depth 1 and 2).
+/// Scan `base_dir` for analysed repositories (depth 1 and 2).
 ///
-/// A directory is considered a repository when it contains a `.git` entry.
+/// A directory qualifies as a target when it contains a `.janitor` subdirectory.
+/// This survives the Scorched Earth protocol, which deletes `.git` to reclaim SSD
+/// space but preserves `.janitor` (bounce log + WOPR graph) for dashboarding.
 /// At depth 2 (`<owner>/<repo>`) the display name includes the owner prefix.
 fn scan_targets(base_dir: &Path) -> Vec<Target> {
     let mut targets = Vec::new();
@@ -112,8 +114,8 @@ fn scan_targets(base_dir: &Path) -> Vec<Target> {
             continue;
         }
 
-        // Depth-1 repo: <base>/<repo>/.git
-        if p1.join(".git").exists() {
+        // Depth-1 target: <base>/<repo>/.janitor
+        if p1.join(".janitor").exists() {
             let name = p1
                 .file_name()
                 .unwrap_or_default()
@@ -128,13 +130,13 @@ fn scan_targets(base_dir: &Path) -> Vec<Target> {
             continue;
         }
 
-        // Depth-2 repos: <base>/<owner>/<repo>/.git
+        // Depth-2 targets: <base>/<owner>/<repo>/.janitor
         let Ok(level2) = std::fs::read_dir(&p1) else {
             continue;
         };
         for e2 in level2.flatten() {
             let p2 = e2.path();
-            if !p2.is_dir() || !p2.join(".git").exists() {
+            if !p2.is_dir() || !p2.join(".janitor").exists() {
                 continue;
             }
             let owner = p1.file_name().unwrap_or_default().to_string_lossy();

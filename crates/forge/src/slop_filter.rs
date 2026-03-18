@@ -551,17 +551,20 @@ impl PRBouncer for PatchBouncer {
 
         let source = added.as_bytes();
 
-        // Circuit breaker: skip tree-sitter AST work for patch sections > 1 MB.
-        // Such sections are overwhelmingly auto-generated (C# P/Invoke bindings,
-        // protobuf stubs, WASM glue) and would stall the engine on an 8 GB machine.
-        if source.len() > 1_048_576 {
+        // Circuit breaker: skip tree-sitter AST work for patch sections > 256 KB.
+        // The Rust compiler and other mega-repos contain AST bombs (auto-generated
+        // match arms, macro expansions) that can crash tree-sitter regardless of
+        // stack size.  256 KB is the empirical ceiling for well-formed hand-authored
+        // diffs; beyond it the content is overwhelmingly generated (P/Invoke
+        // bindings, protobuf stubs, WASM glue).
+        if source.len() > 256 * 1024 {
             return Ok(SlopScore::default());
         }
 
         // NCD Entropy Gate — O(N) compressibility check before the AST crawl.
         //
         // zstd-compress the added source at level 3.  A compression ratio below
-        // MIN_ENTROPY_RATIO (0.15) means the patch is highly self-similar: the
+        // MIN_ENTROPY_RATIO (0.05) means the patch is highly self-similar: the
         // canonical signal for AI-generated boilerplate or auto-templated code.
         // The finding is accumulated here and merged into the final antipattern
         // list at score assembly — the AST analysis still runs to capture all

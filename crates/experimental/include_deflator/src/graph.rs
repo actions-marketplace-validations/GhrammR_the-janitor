@@ -14,6 +14,7 @@
 use std::{collections::HashMap, path::Path, sync::OnceLock};
 
 use anyhow::{Context, Result};
+use git2::Repository;
 use petgraph::{csr::Csr, visit::EdgeRef as _};
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator as _};
 
@@ -174,14 +175,59 @@ impl IncludeGraphBuilder {
         Ok(())
     }
 
+    /// Walk the `HEAD` tree of `repo` in-memory, extracting `#include` edges from
+    /// all C/C++ blobs without touching the filesystem.
+    ///
+    /// This is the correct path when the orchestrator uses `--no-checkout` or when
+    /// the Scorched Earth protocol has already deleted the working tree.  Every blob
+    /// is loaded directly from the Git object database via `blob.content()`.
+    pub fn scan_repo(&mut self, repo: &Repository) -> Result<()> {
+        let head_tree = repo
+            .head()
+            .context("resolve HEAD")?
+            .peel_to_commit()
+            .context("HEAD is not a commit")?
+            .tree()
+            .context("get commit tree")?;
+
+        // Collect (rel_path, blob_oid) pairs — we cannot mutably borrow `self`
+        // inside the walk callback, so we stage them first.
+        let mut cpp_blobs: Vec<(String, git2::Oid)> = Vec::new();
+        head_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+            if entry.kind() == Some(git2::ObjectType::Blob) {
+                let name = entry.name().unwrap_or("");
+                if is_cpp_ext(ext_of(name)) {
+                    cpp_blobs.push((format!("{root}{name}"), entry.id()));
+                }
+            }
+            0 // TreeWalkResult::Ok
+        })?;
+
+        for (rel_path, oid) in cpp_blobs {
+            if let Ok(blob) = repo.find_blob(oid) {
+                let _ = self.scan_bytes(blob.content(), &rel_path);
+            }
+        }
+        Ok(())
+    }
+
     /// Extract `#include` directives from a single file, adding edges to the builder.
     pub fn scan_file(&mut self, path: &Path, root: &Path) -> Result<()> {
         let source = std::fs::read(path)?;
+        let rel = normalize_path(path, root);
+        self.scan_bytes(&source, &rel)
+    }
+
+    /// Extract `#include` directives from raw bytes, adding edges to the builder.
+    ///
+    /// `rel_path` is the normalized path relative to the repository root, used as
+    /// the node label for the `from` side of each edge.
+    pub fn scan_bytes(&mut self, source: &[u8], rel_path: &str) -> Result<()> {
         if source.is_empty() || source.len() > 4 * 1024 * 1024 {
             return Ok(());
         }
 
-        let lang: &'static Language = if is_c_only(path) {
+        let lang: &'static Language = if is_c_only_ext(ext_of(rel_path)) {
             c_language()
         } else {
             cpp_language()
@@ -190,17 +236,17 @@ impl IncludeGraphBuilder {
         parser.set_language(lang).context("set language")?;
 
         let tree = parser
-            .parse(&source, None)
+            .parse(source, None)
             .context("tree-sitter parse returned None")?;
 
         let query = include_query(lang);
         let mut cursor = QueryCursor::new();
-        let from = normalize_path(path, root);
+        let from = rel_path.to_string();
 
-        let mut matches = cursor.matches(query, tree.root_node(), source.as_slice());
+        let mut matches = cursor.matches(query, tree.root_node(), source);
         while let Some(m) = matches.next() {
             for cap in m.captures {
-                let text = cap.node.utf8_text(&source).unwrap_or("").trim();
+                let text = cap.node.utf8_text(source).unwrap_or("").trim();
                 let inner = text
                     .trim_start_matches('"')
                     .trim_end_matches('"')
@@ -281,15 +327,22 @@ impl Default for IncludeGraphBuilder {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-fn is_cpp_file(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx")
-    )
+/// Extract the file extension from a path string (after the last `.`).
+/// Returns `""` when no extension is present.
+fn ext_of(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or("")
 }
 
-fn is_c_only(path: &Path) -> bool {
-    matches!(path.extension().and_then(|e| e.to_str()), Some("c" | "h"))
+fn is_cpp_ext(ext: &str) -> bool {
+    matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx")
+}
+
+fn is_c_only_ext(ext: &str) -> bool {
+    matches!(ext, "c" | "h")
+}
+
+fn is_cpp_file(path: &Path) -> bool {
+    is_cpp_ext(path.extension().and_then(|e| e.to_str()).unwrap_or(""))
 }
 
 fn normalize_path(path: &Path, root: &Path) -> String {

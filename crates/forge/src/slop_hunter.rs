@@ -1215,11 +1215,15 @@ fn find_hcl_slop(source: &[u8]) -> Vec<SlopFinding> {
 
 /// Minimum compression ratio below which the entropy gate triggers.
 ///
-/// A patch whose `zstd`-compressed size is less than 15 % of the raw size
+/// A patch whose `zstd`-compressed size is less than 5 % of the raw size
 /// contains highly repetitive structure — the hallmark of AI-generated or
-/// auto-templated boilerplate.  Legitimate hand-authored code (typical ratio
-/// 0.25–0.55) stays well above this floor.
-pub const MIN_ENTROPY_RATIO: f64 = 0.15;
+/// auto-templated boilerplate.  The threshold is intentionally conservative
+/// (0.05 rather than 0.15) to account for the repetitive Git diff metadata
+/// headers (`@@`, `---`, `+++`) that appear at the top of every unified diff
+/// and compress very aggressively, lowering the apparent ratio for short but
+/// legitimate patches.  Legitimate hand-authored code (typical ratio 0.25–0.55)
+/// stays well above this floor even after diff header inflation is factored in.
+pub const MIN_ENTROPY_RATIO: f64 = 0.05;
 
 /// Minimum input size (bytes) before the entropy gate engages.
 ///
