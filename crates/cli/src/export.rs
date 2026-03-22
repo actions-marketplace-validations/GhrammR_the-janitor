@@ -6,7 +6,7 @@
 //! Static-scan fallback: when no bounce log exists, loads `.janitor/symbols.rkyv`
 //! and emits one CSV row per dead symbol (PR-specific columns left empty).
 //!
-//! ## Columns (17 total)
+//! ## Columns (14 total)
 //!
 //! | # | Column | Notes |
 //! |---|--------|-------|
@@ -16,17 +16,14 @@
 //! | 4 | `Mesa_Triggered` | Reserved for SaaS; always `FALSE` in CLI |
 //! | 5 | `Trust_Delta` | Reserved for SaaS; always `0` in CLI |
 //! | 6 | `Unlinked_PR` | `1` if no issue link detected, else `0` |
-//! | 7 | `Dead_Code_Count` | Functions re-added from the dead-symbol registry |
-//! | 8 | `Logic_Clones` | SimHash clone pairs within the patch |
-//! | 9 | `Zombie_Syms` | Verbatim dead-body reintroductions |
-//! | 10 | `Zombie_Deps` | Manifest-declared deps never imported; joined with `\|` |
-//! | 11 | `Violation_Reasons` | Human-readable audit trail; all flags joined with `\|` |
-//! | 12 | `Time_Saved_Hours` | 0.2 h per actionable intercept |
-//! | 13 | `Operational_Savings_USD` | Time × $100/hr loaded engineering cost |
-//! | 14 | `Timestamp` | ISO 8601 UTC |
-//! | 15 | `PR_State` | `open`, `merged`, or `closed` |
-//! | 16 | `Is_Bot` | `TRUE` when author is in `trusted_bot_authors` (janitor.toml) |
-//! | 17 | `Repo_Slug` | GitHub `owner/repo` slug |
+//! | 7 | `Logic_Clones` | SimHash clone pairs within the patch |
+//! | 8 | `Violation_Reasons` | Human-readable audit trail; all flags joined with `\|` |
+//! | 9 | `Time_Saved_Hours` | 0.2 h per necrotic intercept (labor reclaimed) |
+//! | 10 | `Operational_Savings_USD` | $150 if Critical Threat (security: / Swarm), $20 if Necrotic GC, else $0 |
+//! | 11 | `Timestamp` | ISO 8601 UTC |
+//! | 12 | `PR_State` | `open`, `merged`, or `closed` |
+//! | 13 | `Is_Bot` | `TRUE` when author is in `trusted_bot_authors` (janitor.toml) |
+//! | 14 | `Repo_Slug` | GitHub `owner/repo` slug |
 
 use anyhow::Result;
 use std::io::Write as _;
@@ -104,10 +101,7 @@ pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
         "Mesa_Triggered",
         "Trust_Delta",
         "Unlinked_PR",
-        "Dead_Code_Count",
         "Logic_Clones",
-        "Zombie_Syms",
-        "Zombie_Deps",
         "Violation_Reasons",
         "Time_Saved_Hours",
         "Operational_Savings_USD",
@@ -118,23 +112,25 @@ pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
     ])?;
 
     const MINUTES_PER_TRIAGE: f64 = 12.0;
-    const HOURLY_COST_USD: f64 = 100.0;
 
     for (_repo_name, entries) in repo_logs {
         for entry in &entries {
-            let actionable = entry.slop_score >= 100
-                || entry.zombie_symbols_added > 0
-                || entry
-                    .antipatterns
-                    .iter()
-                    .any(|a| a.contains("Unverified Security Bump"));
+            let critical = crate::report::is_critical_threat(entry);
+            let necrotic = entry.necrotic_flag.is_some();
 
-            let time_saved_h = if actionable {
+            let time_saved_h = if necrotic {
                 MINUTES_PER_TRIAGE / 60.0
             } else {
                 0.0_f64
             };
-            let savings_usd = time_saved_h * HOURLY_COST_USD;
+            // Categorical billing: Critical Threats ($150) > GC-only Necrotic ($20) > $0.
+            let savings_usd: u32 = if critical {
+                150
+            } else if necrotic {
+                20
+            } else {
+                0
+            };
 
             let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
             let author_str = csv_sanitize(entry.author.as_deref().unwrap_or(""));
@@ -144,13 +140,10 @@ pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
             } else {
                 "FALSE"
             };
-            let dead_str = entry.dead_symbols_added.to_string();
             let clones_str = entry.logic_clones_found.min(50).to_string();
-            let zombie_syms_str = entry.zombie_symbols_added.to_string();
-            let zombie_deps_str = csv_sanitize(&entry.zombie_deps.join(" | "));
             let violation_reasons = csv_sanitize(&build_violation_reasons(entry));
             let time_str = format!("{time_saved_h:.4}");
-            let savings_str = format!("{savings_usd:.2}");
+            let savings_str = savings_usd.to_string();
             let state_str = entry.state.to_string();
             let is_bot_str = if entry.is_bot { "TRUE" } else { "FALSE" };
 
@@ -161,10 +154,7 @@ pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
                 "FALSE",
                 "0",
                 unlinked_str, // Unlinked_PR — boolean TRUE/FALSE
-                dead_str.as_str(),
                 clones_str.as_str(),
-                zombie_syms_str.as_str(),
-                zombie_deps_str.as_str(),
                 violation_reasons.as_str(),
                 time_str.as_str(),
                 savings_str.as_str(),
@@ -199,11 +189,10 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
 
     let mut wtr = bom_csv_writer(out)?;
 
-    // ROI constants — mirror report.rs values.
+    // ROI constant — mirrors report.rs.
     const MINUTES_PER_TRIAGE: f64 = 12.0;
-    const HOURLY_COST_USD: f64 = 100.0;
 
-    // Exact 17-column header schema.
+    // Exact 14-column header schema.
     wtr.write_record([
         "PR_Number",
         "Author",
@@ -211,10 +200,7 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         "Mesa_Triggered",
         "Trust_Delta",
         "Unlinked_PR",
-        "Dead_Code_Count",
         "Logic_Clones",
-        "Zombie_Syms",
-        "Zombie_Deps",
         "Violation_Reasons",
         "Time_Saved_Hours",
         "Operational_Savings_USD",
@@ -225,20 +211,22 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
     ])?;
 
     for entry in &entries {
-        // Actionable = any gate criterion met.
-        let actionable = entry.slop_score >= 100
-            || entry.zombie_symbols_added > 0
-            || entry
-                .antipatterns
-                .iter()
-                .any(|a| a.contains("Unverified Security Bump"));
+        let critical = crate::report::is_critical_threat(entry);
+        let necrotic = entry.necrotic_flag.is_some();
 
-        let time_saved_h = if actionable {
+        let time_saved_h = if necrotic {
             MINUTES_PER_TRIAGE / 60.0
         } else {
             0.0_f64
         };
-        let savings_usd = time_saved_h * HOURLY_COST_USD;
+        // Categorical billing: Critical Threats ($150) > GC-only Necrotic ($20) > $0.
+        let savings_usd: u32 = if critical {
+            150
+        } else if necrotic {
+            20
+        } else {
+            0
+        };
 
         let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
         let author_str = csv_sanitize(entry.author.as_deref().unwrap_or(""));
@@ -248,13 +236,10 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
         } else {
             "FALSE"
         };
-        let dead_str = entry.dead_symbols_added.to_string();
         let clones_str = entry.logic_clones_found.min(50).to_string();
-        let zombie_syms_str = entry.zombie_symbols_added.to_string();
-        let zombie_deps_str = csv_sanitize(&entry.zombie_deps.join(" | "));
         let violation_reasons = csv_sanitize(&build_violation_reasons(entry));
         let time_str = format!("{time_saved_h:.4}");
-        let savings_str = format!("{savings_usd:.2}");
+        let savings_str = savings_usd.to_string();
         let state_str = entry.state.to_string();
         let is_bot_str = if entry.is_bot { "TRUE" } else { "FALSE" };
 
@@ -265,10 +250,7 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
             "FALSE",      // Mesa_Triggered — SaaS reserved
             "0",          // Trust_Delta   — SaaS reserved
             unlinked_str, // Unlinked_PR   — boolean TRUE/FALSE
-            dead_str.as_str(),
             clones_str.as_str(),
-            zombie_syms_str.as_str(),
-            zombie_deps_str.as_str(),
             violation_reasons.as_str(),
             time_str.as_str(),
             savings_str.as_str(),
@@ -335,10 +317,7 @@ fn export_static_scan(janitor_dir: &Path, out: &Path) -> Result<()> {
         "Mesa_Triggered",
         "Trust_Delta",
         "Unlinked_PR",
-        "Dead_Code_Count",
         "Logic_Clones",
-        "Zombie_Syms",
-        "Zombie_Deps",
         "Violation_Reasons",
         "Time_Saved_Hours",
         "Operational_Savings_USD",
@@ -352,7 +331,8 @@ fn export_static_scan(janitor_dir: &Path, out: &Path) -> Result<()> {
 
     for entry in &dead {
         let byte_size = entry.end_byte.saturating_sub(entry.start_byte);
-        // Score proxy: dead-symbol weight (×10) applied to byte size in units of 100 B.
+        // Score proxy: byte size in units of 100 B (informational — dead symbols
+        // no longer contribute to the bounce score formula).
         let score = byte_size / 10;
         let score_str = score.to_string();
         let violation = csv_sanitize(&format!(
@@ -367,13 +347,10 @@ fn export_static_scan(janitor_dir: &Path, out: &Path) -> Result<()> {
             "FALSE", // Mesa_Triggered
             "0",     // Trust_Delta
             "0",     // Unlinked_PR
-            "1",     // Dead_Code_Count — one dead symbol per row
             "0",     // Logic_Clones
-            "0",     // Zombie_Syms
-            "",      // Zombie_Deps
             violation.as_str(),
             "0.0000", // Time_Saved_Hours
-            "0.00",   // Operational_Savings_USD
+            "0",      // Operational_Savings_USD
             timestamp.as_str(),
             "open",  // PR_State — N/A for static scan
             "FALSE", // Is_Bot — N/A for static scan
@@ -416,14 +393,14 @@ fn build_violation_reasons(entry: &crate::report::BounceLogEntry) -> String {
         ));
     }
 
-    // ── Dead symbol introduction (×10 each) ───────────────────────────────
-    if entry.dead_symbols_added > 0 {
-        reasons.push(format!("Dead Symbol Added x{}", entry.dead_symbols_added));
-    }
-
     // ── Structural clones (×5 each) ────────────────────────────────────────
     if entry.logic_clones_found > 0 {
-        reasons.push(format!("Structural Clone x{}", entry.logic_clones_found));
+        let count_str = if entry.logic_clones_found > 50 {
+            "50+".to_owned()
+        } else {
+            entry.logic_clones_found.to_string()
+        };
+        reasons.push(format!("Structural Clone x{count_str}"));
     }
 
     // ── Comment violations (×5 each) ───────────────────────────────────────

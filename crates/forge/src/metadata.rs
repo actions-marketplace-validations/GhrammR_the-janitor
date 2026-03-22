@@ -400,6 +400,7 @@ pub fn detect_hallucinated_fix(
             file_extensions.join(", ")
         ),
         domain: DOMAIN_ALL,
+        severity: crate::slop_hunter::Severity::Critical,
     })
 }
 

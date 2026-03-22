@@ -189,38 +189,57 @@ const SIM_SKIP_KINDS: &[&str] = &[
     "binary_literal",
 ];
 
-/// Recursively collect SimHash features from the AST.
+/// Iteratively collect SimHash features from the AST.
 ///
-/// Each non-skipped node contributes a feature `(kind_id, depth)` hashed via BLAKE3.
-/// The BLAKE3 feature hash drives 64 vote counters (+1 for set bits, −1 for clear bits).
-fn collect_features(node: Node<'_>, _source: &[u8], depth: u32, counters: &mut [i32; 64]) {
-    if SIM_SKIP_KINDS.contains(&node.kind()) {
-        return;
-    }
+/// Uses an explicit `Vec<(Node, u32)>` stack for depth-first traversal —
+/// zero recursive calls, immune to stack overflow on deep ASTs.
+///
+/// Each non-skipped node contributes a feature `(kind_id, depth)` hashed via
+/// BLAKE3.  The BLAKE3 feature hash drives 64 vote counters (+1 for set bits,
+/// −1 for clear bits).  Because SimHash aggregation is commutative, processing
+/// order within a sibling group does not affect the final fingerprint.
+fn collect_features(root: Node<'_>, _source: &[u8], start_depth: u32, counters: &mut [i32; 64]) {
+    // Stack items: (node, depth_at_node).  Children are pushed in reverse
+    // order so the leftmost child is processed first (matching recursive DFS).
+    let mut stack: Vec<(Node<'_>, u32)> = vec![(root, start_depth)];
 
-    // Feature: hash (kind_id u16 LE || depth u32 LE) → BLAKE3 → u64.
-    let feature_hash = {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&node.kind_id().to_le_bytes());
-        hasher.update(&depth.to_le_bytes());
-        let digest = hasher.finalize();
-        let d = digest.as_bytes();
-        u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
-    };
-
-    // Drive vote counters.
-    for i in 0..64u32 {
-        if (feature_hash >> i) & 1 == 1 {
-            counters[i as usize] += 1;
-        } else {
-            counters[i as usize] -= 1;
+    while let Some((node, depth)) = stack.pop() {
+        if node.is_error() || node.is_missing() {
+            // Do not hash syntax errors caused by incomplete diff snippets.
+            continue;
         }
-    }
+        if SIM_SKIP_KINDS.contains(&node.kind()) {
+            // Skip this node and its entire subtree.
+            continue;
+        }
 
-    // Recurse into children.
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_features(child, _source, depth + 1, counters);
+        // Feature: hash (kind_id u16 LE || depth u32 LE) → BLAKE3 → u64.
+        let feature_hash = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&node.kind_id().to_le_bytes());
+            hasher.update(&depth.to_le_bytes());
+            let digest = hasher.finalize();
+            let d = digest.as_bytes();
+            u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
+        };
+
+        // Drive vote counters.
+        for i in 0..64u32 {
+            if (feature_hash >> i) & 1 == 1 {
+                counters[i as usize] += 1;
+            } else {
+                counters[i as usize] -= 1;
+            }
+        }
+
+        // Push children in reverse order (rightmost first) so the leftmost
+        // child is processed next, preserving DFS left-to-right semantics.
+        let child_depth = depth + 1;
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push((child, child_depth));
+        }
     }
 }
 
@@ -249,14 +268,19 @@ pub fn count_structural_tokens(node: Node<'_>) -> usize {
     count
 }
 
-fn count_structural_inner(node: Node<'_>, count: &mut usize) {
-    if SIM_SKIP_KINDS.contains(&node.kind()) {
-        return;
-    }
-    *count += 1;
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        count_structural_inner(child, count);
+fn count_structural_inner(root: Node<'_>, count: &mut usize) {
+    // Iterative DFS — zero recursive calls.
+    let mut stack: Vec<Node<'_>> = vec![root];
+    while let Some(node) = stack.pop() {
+        if SIM_SKIP_KINDS.contains(&node.kind()) {
+            continue;
+        }
+        *count += 1;
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
     }
 }
 

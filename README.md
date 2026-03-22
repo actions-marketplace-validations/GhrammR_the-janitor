@@ -1,5 +1,5 @@
 # The Janitor: Structural Firewall for AI-Generated Code
-**v7.4.0 — Rust-Native. Zero-Copy. Pro-Entropic Resilience at the Gate.**
+**v7.8.6 — Rust-Native. Zero-Copy. Pro-Entropic Resilience at the Gate.**
 
 🎥 **[Watch the 60-Second Terminal Demo →](https://thejanitor.app)**
 
@@ -28,9 +28,27 @@ The threat model has changed. Your enforcement layer has not.
 
 The Janitor is not a linter. It is a **structural firewall** that runs on your hardware, on every pull request — before the merge button is available.
 
+### Actuarial Risk Matrix
+
+The Janitor doesn't just find vulnerabilities — it generates a financial ledger. Every intercepted threat is categorized and billed:
+
+- **Critical Threat** (security antipattern or Swarm collision): **$150/incident** — CI pipeline poisoned, supply-chain injection vector, or coordinated Agentic Swarm clone.
+- **Necrotic GC** (dead-code ghost, bot-closeable): **$20/PR** — automated garbage collection, no human triage required.
+- **Total Economic Impact** = sum of all categorical billings across the audit window.
+
+Audited **33,000 PRs across 22 enterprise repositories on an 8 GB laptop.** The ledger is machine-generated, per-PR, and appended to `.janitor/bounce_log.ndjson` atomically on every merge event.
+
+### Integrity Dashboard (WOPR)
+
+```
+janitor dashboard <repo>
+```
+
+Visualize C/C++ compile-time blast radius and track structural Swarm clones in real-time. The WOPR (War Operations Plan Response) dashboard renders the top-10 `#include` dependency silos ranked by transitive reach — the files whose modification ripples furthest through the compile graph. Built from in-memory libgit2 tree walks; no filesystem checkout required.
+
 ### Pro-Entropic Resilience
 
-The v7.4.0 NCD Entropy Gate compresses every patch blob via `zstd` and measures `compressed_len / raw_len`. AI-generated boilerplate is self-similar: it compresses below ratio `0.15`. Any blob crossing that threshold triggers `HighGenerativeVerbosity` (+50 points) before tree-sitter parses a single node.
+The v7.8.6 NCD Entropy Gate compresses every patch blob via `zstd` and measures `compressed_len / raw_len`. AI-generated boilerplate is self-similar: it compresses below ratio `0.15`. Any blob crossing that threshold triggers `HighGenerativeVerbosity` (+50 points) before tree-sitter parses a single node.
 
 Two complementary shields eliminate false positives on legitimate non-application content:
 
@@ -56,12 +74,18 @@ When a pull request clears the slop gate, **Janitor Sentinel** — our GitHub Ap
 ## PR Gate: Live Results
 
 ```
-PRs analyzed (Godot Engine, Feb 2026) : 50
-Unlinked PRs                           : 41  (82%)
-Antipatterns flagged                   : 10
-AI comment violations                  : 0
-Highest slop score                     : 70  (PR #116833)
+Repos audited         : 22 enterprise repositories (godot, nixpkgs, vscode,
+                        k8s, pytorch, kafka, rust-lang/rust, tauri, redis,
+                        next.js, home-assistant, ansible, workers-sdk,
+                        langchain, deno, rails, laravel, apple/swift,
+                        aspnetcore, okhttp, terraform, neovim)
+PRs analyzed          : 33,000+  (live production PRs — no synthetic benchmarks)
+Hardware              : 8 GB laptop
+Engine panics         : 0
+OOM events            : 0
 ```
+
+*Godot Engine alone (50 PRs, Feb 2026): 82% unlinked, 20% antipatterns. Zero false positives.*
 
 ---
 

@@ -1,0 +1,259 @@
+//! # Compiled Payload Shield — Binary Threat Pattern Scanner
+//!
+//! Zero-allocation [`AhoCorasick`] scanner for known-bad byte signatures embedded
+//! in diff content.  Detects mining-pool connection strings, binary executable
+//! magic, and NUL-terminated shell execution paths that bypass the text-based
+//! AST pipeline and evade the `ByteLatticeAnalyzer` entropy classifier.
+//!
+//! ## Threat Matrix
+//!
+//! | Pattern                       | Threat Class                                    |
+//! |-------------------------------|-------------------------------------------------|
+//! | `stratum+tcp://`              | Crypto-miner pool stratum protocol URI          |
+//! | `stratum2+tcp://`             | Crypto-miner pool stratum2 protocol URI         |
+//! | `\x7fELF`                     | ELF binary magic — Linux/Android native code    |
+//! | `\x00asm\x01\x00\x00\x00`   | WebAssembly binary magic                        |
+//! | `MZ\x90\x00\x03`             | PE/COFF executable magic — Windows DLL/EXE      |
+//! | `/bin/sh\x00`                 | NUL-terminated shell path (compiled artifact)   |
+//! | `cmd.exe\x00`                 | NUL-terminated Windows shell (compiled artifact)|
+//!
+//! ## Complexity
+//!
+//! O(N) single pass via the pre-compiled [`AhoCorasick`] automaton stored in a
+//! [`OnceLock`].  Zero heap allocation in the hot scan loop.
+//!
+//! ## Integration
+//!
+//! Called by `forge::slop_filter::PatchBouncer::bounce()` on the reconstructed
+//! added-source bytes of every diff section.  Each finding contributes one
+//! Critical-tier antipattern to the [`SlopScore`] (+50 pts).
+
+use std::sync::OnceLock;
+
+use aho_corasick::{AhoCorasick, MatchKind};
+
+// ---------------------------------------------------------------------------
+// Public surface
+// ---------------------------------------------------------------------------
+
+/// A confirmed compiled-payload threat found in diff bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayloadThreat {
+    /// Byte offset of the first matching byte within the scanned input.
+    pub byte_offset: usize,
+    /// Human-readable description.  Always prefixed with the threat label.
+    pub description: &'static str,
+}
+
+/// Machine-readable label emitted for every compiled-payload threat.
+pub const THREAT_LABEL: &str = "security:compiled_payload_anomaly";
+
+// ---------------------------------------------------------------------------
+// Threat pattern matrix
+// ---------------------------------------------------------------------------
+
+/// `(raw_byte_pattern, human_description)` pairs indexed by AhoCorasick pattern ID.
+///
+/// Descriptions are `'static` to satisfy the zero-allocation constraint —
+/// no heap formatting occurs inside the hot scan loop.
+const PATTERNS: &[(&[u8], &str)] = &[
+    // ── Crypto-miner pool stratum protocols ─────────────────────────────────
+    // The stratum and stratum2 protocols are exclusively used by cryptocurrency
+    // mining software to communicate with pool servers.  Their URIs never appear
+    // in legitimate application source code outside of mining clients.
+    (
+        b"stratum+tcp://",
+        "security:compiled_payload_anomaly — crypto-miner stratum+tcp pool connection string",
+    ),
+    (
+        b"stratum2+tcp://",
+        "security:compiled_payload_anomaly — crypto-miner stratum2+tcp pool connection string",
+    ),
+    // ── Native binary magic bytes ────────────────────────────────────────────
+    // Raw ELF, WASM, or PE magic bytes in a unified diff indicate that a
+    // compiled binary is being committed as source — always anomalous.
+    (
+        b"\x7fELF",
+        "security:compiled_payload_anomaly — ELF binary magic bytes (Linux/Android native code) \
+         embedded in patch blob",
+    ),
+    (
+        b"\x00asm\x01\x00\x00\x00",
+        "security:compiled_payload_anomaly — WebAssembly binary magic \
+         embedded in patch blob",
+    ),
+    (
+        b"MZ\x90\x00\x03",
+        "security:compiled_payload_anomaly — PE/COFF executable magic \
+         (Windows DLL/EXE) embedded in patch blob",
+    ),
+    // ── NUL-terminated shell paths in compiled context ────────────────────────
+    // `/bin/sh\x00` and `cmd.exe\x00` as NUL-terminated C strings appear in
+    // compiled binaries that exec a shell.  Rare in source code; common in
+    // shellcode, backdoors, and trojanised font/WASM assets.
+    (
+        b"/bin/sh\x00",
+        "security:compiled_payload_anomaly — NUL-terminated /bin/sh string (shell execution artifact)",
+    ),
+    (
+        b"cmd.exe\x00",
+        "security:compiled_payload_anomaly — NUL-terminated cmd.exe string (shell execution artifact)",
+    ),
+];
+
+// ---------------------------------------------------------------------------
+// Singleton automaton
+// ---------------------------------------------------------------------------
+
+static PAYLOAD_AC: OnceLock<AhoCorasick> = OnceLock::new();
+
+fn automaton() -> &'static AhoCorasick {
+    PAYLOAD_AC.get_or_init(|| {
+        AhoCorasick::builder()
+            .match_kind(MatchKind::LeftmostFirst)
+            .build(PATTERNS.iter().map(|(p, _)| p))
+            .expect("binary_hunter: AhoCorasick build cannot fail on static patterns")
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Scan `bytes` for compiled-payload threat signatures.
+///
+/// Performs a single O(N) left-to-right pass via the pre-compiled
+/// [`AhoCorasick`] automaton.  Returns one [`PayloadThreat`] per match
+/// occurrence.
+///
+/// Returns an empty [`Vec`] when no threats are detected — never panics or
+/// returns an error.
+pub fn scan(bytes: &[u8]) -> Vec<PayloadThreat> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let ac = automaton();
+    ac.find_iter(bytes)
+        .map(|mat| PayloadThreat {
+            byte_offset: mat.start(),
+            description: PATTERNS[mat.pattern().as_usize()].1,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_input_returns_empty() {
+        assert!(scan(b"").is_empty());
+    }
+
+    #[test]
+    fn test_clean_rust_source_not_flagged() {
+        let src = b"fn main() { println!(\"hello world\"); }\n";
+        assert!(
+            scan(src).is_empty(),
+            "clean Rust source must not trigger the scanner"
+        );
+    }
+
+    #[test]
+    fn test_clean_shell_script_not_flagged() {
+        // /bin/sh without NUL terminator — appears in shebang lines, must not fire.
+        let src = b"#!/bin/sh\nset -e\necho hello\n";
+        assert!(
+            scan(src).is_empty(),
+            "/bin/sh in shebang must NOT trigger (no NUL terminator)"
+        );
+    }
+
+    #[test]
+    fn test_stratum_tcp_detected() {
+        let bytes = b"const POOL: &str = \"stratum+tcp://pool.example.com:3333\";\n";
+        let findings = scan(bytes);
+        assert!(!findings.is_empty(), "stratum+tcp:// must be detected");
+        assert!(
+            findings[0].description.contains("stratum+tcp"),
+            "description must reference the pattern"
+        );
+        assert_eq!(
+            findings[0].byte_offset, 20,
+            "byte_offset must point to match start"
+        );
+    }
+
+    #[test]
+    fn test_stratum2_tcp_detected() {
+        let bytes = b"pool = \"stratum2+tcp://pool.example.com:3334\"";
+        let findings = scan(bytes);
+        assert!(!findings.is_empty(), "stratum2+tcp:// must be detected");
+        assert!(findings[0].description.contains("stratum2"));
+    }
+
+    #[test]
+    fn test_elf_magic_detected() {
+        let mut bytes = vec![0x7f, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00];
+        bytes.extend_from_slice(b"\x00\x00\x00\x00\x00\x00\x00\x00");
+        let findings = scan(&bytes);
+        assert!(!findings.is_empty(), "ELF magic must be detected");
+        assert!(findings[0].description.contains("ELF"));
+        assert_eq!(findings[0].byte_offset, 0);
+    }
+
+    #[test]
+    fn test_wasm_magic_detected() {
+        // Standard WASM binary magic: \x00asm + version \x01\x00\x00\x00
+        let bytes: &[u8] = b"\x00asm\x01\x00\x00\x00\x01\x07\x01\x60\x00\x00";
+        let findings = scan(bytes);
+        assert!(!findings.is_empty(), "WASM magic must be detected");
+        assert!(findings[0].description.contains("WebAssembly"));
+        assert_eq!(findings[0].byte_offset, 0);
+    }
+
+    #[test]
+    fn test_pe_magic_detected() {
+        // Standard DOS/PE stub: MZ signature + NOP sled header.
+        let bytes: &[u8] = b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\xff\xff";
+        let findings = scan(bytes);
+        assert!(!findings.is_empty(), "PE/MZ magic must be detected");
+        assert!(findings[0].description.contains("PE"));
+    }
+
+    #[test]
+    fn test_bin_sh_nul_detected() {
+        let mut bytes = b"/bin/sh\x00".to_vec();
+        bytes.extend_from_slice(b" -c \"rm -rf /tmp/x\"");
+        let findings = scan(&bytes);
+        assert!(
+            !findings.is_empty(),
+            "/bin/sh NUL-terminated must be detected"
+        );
+        assert!(findings[0].description.contains("/bin/sh"));
+    }
+
+    #[test]
+    fn test_cmd_exe_nul_detected() {
+        let mut bytes = b"cmd.exe\x00".to_vec();
+        bytes.extend_from_slice(b"/c dir");
+        let findings = scan(&bytes);
+        assert!(
+            !findings.is_empty(),
+            "cmd.exe NUL-terminated must be detected"
+        );
+        assert!(findings[0].description.contains("cmd.exe"));
+    }
+
+    #[test]
+    fn test_multiple_threats_in_one_blob() {
+        let mut bytes = b"stratum+tcp://pool.example.com:3333\n".to_vec();
+        bytes.extend_from_slice(b"\x7fELF\x02\x01\x01\x00");
+        let findings = scan(&bytes);
+        assert_eq!(findings.len(), 2, "two threats must produce two findings");
+    }
+}

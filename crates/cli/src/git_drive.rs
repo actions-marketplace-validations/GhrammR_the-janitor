@@ -25,6 +25,7 @@
 //! ```
 //! The `just hyper-audit` recipe performs this automatically.
 
+use std::collections::HashSet;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -35,8 +36,10 @@ use anyhow::{anyhow, Result};
 use git2::{Oid, Repository};
 use rayon::prelude::*;
 
+use anatomist::parser::ParserHost;
 use common::physarum::{Pulse, SystemHeart};
-use common::registry::{MappedRegistry, SymbolRegistry};
+use common::registry::{symbol_hash, MappedRegistry, SymbolEntry, SymbolRegistry};
+use common::Protection;
 use forge::slop_filter::bounce_git;
 use include_deflator::graph::IncludeGraphBuilder;
 
@@ -63,11 +66,12 @@ pub fn cmd_hyper_drive(
     limit: usize,
     base_branch: Option<&str>,
     repo_slug: Option<&str>,
+    resume: bool,
 ) -> Result<()> {
     let t0 = Instant::now();
 
     // ── Step 1: collect PR refs ───────────────────────────────────────────
-    let pr_entries = collect_pr_refs(repo_path, limit)?;
+    let mut pr_entries = collect_pr_refs(repo_path, limit)?;
     if pr_entries.is_empty() {
         eprintln!(
             "janitor hyper-drive: no refs/remotes/origin/pr/* found in {}.\n\
@@ -91,7 +95,53 @@ pub fn cmd_hyper_drive(
     let base_sha = find_base_sha(repo_path, base_branch)?;
     eprintln!("janitor hyper-drive: base SHA = {}", &base_sha[..12]);
 
-    // ── Step 3: load symbol registry ─────────────────────────────────────
+    // ── Step 2.5: ensure .janitor dir exists (needed for both symbol index
+    //             and bounce log, so create it once here) ─────────────────
+    let janitor_dir = repo_path.join(".janitor");
+    std::fs::create_dir_all(&janitor_dir)
+        .map_err(|e| anyhow!("Cannot create .janitor dir: {e}"))?;
+
+    // ── Step 2.55: Resume filter ──────────────────────────────────────────
+    // When --resume is active, skip PRs already present in the bounce log so
+    // an interrupted run can be continued without re-scoring completed work.
+    if resume {
+        let processed_set = load_processed_pr_numbers(&janitor_dir);
+        if !processed_set.is_empty() {
+            let before = pr_entries.len();
+            pr_entries.retain(|(pr_num, _)| !processed_set.contains(pr_num));
+            eprintln!(
+                "janitor hyper-drive: resume — skipping {} already-processed PRs ({} remaining)",
+                before - pr_entries.len(),
+                pr_entries.len()
+            );
+        } else {
+            eprintln!("janitor hyper-drive: resume — no prior log found, processing all PRs");
+        }
+        if pr_entries.is_empty() {
+            eprintln!("janitor hyper-drive: resume — all PRs already processed, nothing to do");
+            return Ok(());
+        }
+    }
+
+    // ── Step 2.6: In-memory symbol hydration ─────────────────────────────
+    // Walk the base-branch tree via libgit2, extract entities from every
+    // source blob using the polyglot ParserHost, and serialize the result
+    // to .janitor/symbols.rkyv *before* load_registry (Step 3) runs.
+    // This ensures the Necrotic Pruning Matrix has a populated symbol table
+    // for Ghost Collision and Unwired Island detection without requiring a
+    // filesystem checkout.
+    match build_symbols_rkyv(repo_path, &base_sha) {
+        Ok(n) => eprintln!(
+            "janitor hyper-drive: symbol index hydrated ({n} symbols) → {}",
+            janitor_dir.join("symbols.rkyv").display()
+        ),
+        Err(e) => eprintln!(
+            "janitor hyper-drive: symbol hydration skipped ({e}); \
+             Necrotic Pruner will operate without registry"
+        ),
+    }
+
+    // ── Step 3: load symbol registry (picks up hydrated index) ───────────
     let registry = load_registry(repo_path)?;
 
     // ── Step 4: open bounce log for streaming writes ──────────────────────
@@ -102,9 +152,8 @@ pub fn cmd_hyper_drive(
             .unwrap_or_default()
     });
 
-    let janitor_dir = repo_path.join(".janitor");
-    std::fs::create_dir_all(&janitor_dir)
-        .map_err(|e| anyhow!("Cannot create .janitor dir: {e}"))?;
+    // janitor_dir was already created in Step 2.5 — this is a no-op but
+    // kept for clarity so the log_path derivation block remains self-contained.
 
     let log_path = janitor_dir.join("bounce_log.ndjson");
     let log_file = std::fs::OpenOptions::new()
@@ -117,6 +166,30 @@ pub fn cmd_hyper_drive(
     // blocking each other for the duration of a syscall.
     let writer: Arc<Mutex<BufWriter<std::fs::File>>> =
         Arc::new(Mutex::new(BufWriter::new(log_file)));
+
+    // ── Step 5a: pre-emptive WOPR graph — serialize before any AST work ─────
+    // Executed immediately after base resolution so that a SIGABRT from a
+    // tree-sitter AST bomb during the bounce loop cannot destroy the graph.
+    // The graph is built from the HEAD tree in the git ODB — no working-tree
+    // access required.
+    let wopr_path = janitor_dir.join("wopr_graph.json");
+    match build_wopr_graph(repo_path) {
+        Ok(ranked) => match serde_json::to_string(&ranked) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&wopr_path, json) {
+                    eprintln!("hyper-drive: cannot write wopr_graph.json: {e}");
+                } else {
+                    eprintln!(
+                        "janitor hyper-drive: WOPR graph written ({} silos) → {}",
+                        ranked.len(),
+                        wopr_path.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!("hyper-drive: WOPR graph serialization failed: {e}"),
+        },
+        Err(e) => eprintln!("hyper-drive: WOPR graph build skipped: {e}"),
+    }
 
     // ── Step 5: rayon parallel bounce — write + flush every entry ─────────
     let t1 = Instant::now();
@@ -140,11 +213,16 @@ pub fn cmd_hyper_drive(
 
     pool.install(|| {
         pr_entries.par_iter().for_each(|(pr_num, pr_sha)| {
-            // Physarum Protocol — RAM backpressure gate.
-            // Spin on Stop (>90%); proceed immediately on Constrict or Flow.
-            while let Pulse::Stop = heart.beat() {
-                eprintln!("  [PHYSARUM] RAM >90%. Worker pausing...");
-                std::thread::sleep(std::time::Duration::from_millis(500));
+            // Physarum Eviction Gate — RAM backpressure.
+            // A sleeping thread holds its stack and TLS allocations; sleeping
+            // under memory pressure worsens the very condition it tries to
+            // avoid.  Evict immediately: skip this PR, free the thread's
+            // allocations, and let the OS reclaim the memory.
+            if let Pulse::Stop = heart.beat() {
+                eprintln!(
+                    "  [PHYSARUM] RAM >90%. Evicting PR #{pr_num} to prevent OOM deadlock..."
+                );
+                return;
             }
 
             let entry = bounce_one(repo_path_arc, &base_sha, pr_sha, &registry, *pr_num, &slug);
@@ -199,29 +277,6 @@ pub fn cmd_hyper_drive(
         n_written,
         log_path.display()
     );
-
-    // ── Step 6: build and serialize WOPR include graph ────────────────────
-    // Runs after hyper-drive so the graph captures the final repository state.
-    // Written to `.janitor/wopr_graph.json`; the WOPR dashboard loads this file
-    // on demand instead of re-scanning source (which may be deleted by then).
-    let wopr_path = janitor_dir.join("wopr_graph.json");
-    match build_wopr_graph(repo_path) {
-        Ok(ranked) => match serde_json::to_string(&ranked) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&wopr_path, json) {
-                    eprintln!("hyper-drive: cannot write wopr_graph.json: {e}");
-                } else {
-                    eprintln!(
-                        "janitor hyper-drive: WOPR graph written ({} silos) → {}",
-                        ranked.len(),
-                        wopr_path.display()
-                    );
-                }
-            }
-            Err(e) => eprintln!("hyper-drive: WOPR graph serialization failed: {e}"),
-        },
-        Err(e) => eprintln!("hyper-drive: WOPR graph build skipped: {e}"),
-    }
 
     eprintln!(
         "janitor hyper-drive: total wall time = {:.2}s",
@@ -436,6 +491,34 @@ fn bounce_one(
         .map_err(|e| eprintln!("hyper-drive PR#{pr_num}: merge-base failed: {e}"))
         .ok()?;
 
+    // ── Semantic Null pre-check (full-blob) ──────────────────────────────────
+    // Compare full file blobs from the ODB rather than extracted patch lines.
+    // If ALL modified source files share identical structural AST skeletons,
+    // the PR only changes cosmetic tokens — bypass the full bounce pipeline.
+    if forge::slop_filter::semantic_null_pr_check(repo_path, &merge_base_sha, pr_sha) {
+        let sig = forge::pr_collider::PrDeltaSignature::from_bytes(pr_sha.as_bytes());
+        return Some(BounceLogEntry {
+            pr_number: Some(pr_num as u64),
+            author,
+            timestamp: utc_now_iso8601(),
+            slop_score: 0,
+            dead_symbols_added: 0,
+            logic_clones_found: 0,
+            zombie_symbols_added: 0,
+            unlinked_pr: 0,
+            antipatterns: Vec::new(),
+            comment_violations: Vec::new(),
+            min_hashes: sig.min_hashes.to_vec(),
+            zombie_deps: Vec::new(),
+            state: PrState::Open,
+            is_bot: false,
+            repo_slug: repo_slug.to_string(),
+            suppressed_by_domain: 0,
+            collided_pr_numbers: Vec::new(),
+            necrotic_flag: Some("SEMANTIC_NULL".to_string()),
+        });
+    }
+
     let (score, blobs) = bounce_git(repo_path, &merge_base_sha, pr_sha, registry)
         .map_err(|e| {
             eprintln!("hyper-drive PR#{pr_num}: {e}");
@@ -473,6 +556,171 @@ fn bounce_one(
 }
 
 // ---------------------------------------------------------------------------
+// In-memory symbol hydration
+// ---------------------------------------------------------------------------
+
+/// Walk the base-branch tree of `repo_path` in-memory, extract entities from
+/// every source blob using the polyglot [`ParserHost`], and serialize the
+/// result to `<repo_path>/.janitor/symbols.rkyv`.
+///
+/// This produces the global symbol table required by the Necrotic Pruning
+/// Matrix (Ghost Collision / Unwired Island checks) without requiring a
+/// filesystem checkout.  All source is read from the Git object database via
+/// `blob.content()` — identical to the WOPR graph build pattern.
+///
+/// ## Language coverage
+/// Python and TypeScript are excluded (their extractors require a file on disk
+/// or a non-public API not suitable for in-memory use).  All other Tier-1
+/// languages are covered: Rust, C/C++, Java, C#, Go, JavaScript, Ruby, PHP,
+/// Swift, Lua, Scala, Bash, Objective-C.
+///
+/// ## Circuit breaker
+/// Blobs larger than 256 KiB are skipped — they are almost exclusively
+/// auto-generated bindings, compiled assets, or giant monolithic stubs that
+/// would overwhelm the tree-sitter AST allocator without adding signal.
+///
+/// ## Return value
+/// Returns the number of symbols inserted into the registry on success, or an
+/// error if the repository cannot be opened or the tree cannot be walked.
+fn build_symbols_rkyv(repo_path: &Path, base_sha: &str) -> Result<usize> {
+    const MAX_BLOB: usize = 256 * 1024;
+
+    let repo = Repository::open(repo_path)
+        .map_err(|e| anyhow!("symbol hydration: cannot open repo: {e}"))?;
+
+    let base_oid =
+        Oid::from_str(base_sha).map_err(|e| anyhow!("symbol hydration: invalid base SHA: {e}"))?;
+    let commit = repo
+        .find_commit(base_oid)
+        .map_err(|e| anyhow!("symbol hydration: cannot find base commit: {e}"))?;
+    let tree = commit
+        .tree()
+        .map_err(|e| anyhow!("symbol hydration: cannot get base tree: {e}"))?;
+
+    // Phase A: walk the tree to collect (oid, file_path, ext) entries.
+    // We stage OIDs first because `repo.find_blob()` borrows `repo` and the
+    // tree walk closure also captures `repo` — staging avoids the overlap.
+    let mut entries: Vec<(git2::Oid, String, String)> = Vec::new();
+    tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+        if entry.kind() != Some(git2::ObjectType::Blob) {
+            return 0; // TreeWalkResult::Ok
+        }
+        let name = match entry.name() {
+            Some(n) => n,
+            None => return 0,
+        };
+        let ext = std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_owned();
+
+        // Only collect blobs with a grammar-backed extension.
+        if matches!(
+            ext.as_str(),
+            "rs" | "js"
+                | "jsx"
+                | "cpp"
+                | "cxx"
+                | "cc"
+                | "hpp"
+                | "c"
+                | "h"
+                | "java"
+                | "cs"
+                | "go"
+                | "rb"
+                | "php"
+                | "swift"
+                | "lua"
+                | "scala"
+                | "sh"
+                | "bash"
+                | "m"
+                | "mm"
+        ) {
+            let file_path = if root.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{root}{name}")
+            };
+            entries.push((entry.id(), file_path, ext));
+        }
+        0 // TreeWalkResult::Ok
+    })
+    .map_err(|e| anyhow!("symbol hydration: tree walk failed: {e}"))?;
+
+    // Phase B: load each blob and extract entities.
+    let mut registry = SymbolRegistry::new();
+    let mut count = 0usize;
+
+    for (oid, file_path, ext) in entries {
+        let blob = match repo.find_blob(oid) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let content = blob.content();
+        if content.len() > MAX_BLOB {
+            continue; // circuit breaker
+        }
+
+        let entities = match ext.as_str() {
+            "rs" => ParserHost::extract_rust_entities(content, &file_path).unwrap_or_default(),
+            "js" | "jsx" => {
+                ParserHost::extract_js_entities(content, &file_path).unwrap_or_default()
+            }
+            "cpp" | "cxx" | "cc" | "hpp" => {
+                ParserHost::extract_cpp_entities(content, &file_path).unwrap_or_default()
+            }
+            "c" | "h" => ParserHost::extract_c_entities(content, &file_path).unwrap_or_default(),
+            "java" => ParserHost::extract_java_entities(content, &file_path).unwrap_or_default(),
+            "cs" => ParserHost::extract_csharp_entities(content, &file_path).unwrap_or_default(),
+            "go" => ParserHost::extract_go_entities(content, &file_path).unwrap_or_default(),
+            "rb" => ParserHost::extract_ruby_entities(content, &file_path).unwrap_or_default(),
+            "php" => ParserHost::extract_php_entities(content, &file_path).unwrap_or_default(),
+            "swift" => ParserHost::extract_swift_entities(content, &file_path).unwrap_or_default(),
+            "lua" => ParserHost::extract_lua_entities(content, &file_path).unwrap_or_default(),
+            "scala" => ParserHost::extract_scala_entities(content, &file_path).unwrap_or_default(),
+            "sh" | "bash" => {
+                ParserHost::extract_bash_entities(content, &file_path).unwrap_or_default()
+            }
+            "m" | "mm" => {
+                ParserHost::extract_objc_entities(content, &file_path).unwrap_or_default()
+            }
+            _ => continue,
+        };
+
+        for entity in entities {
+            let sym_id = format!("{}::{}", entity.file_path, entity.qualified_name);
+            registry.insert(SymbolEntry {
+                id: symbol_hash(&sym_id),
+                name: entity.name,
+                qualified_name: entity.qualified_name,
+                file_path: entity.file_path,
+                entity_type: entity.entity_type as u8,
+                start_line: entity.start_line,
+                end_line: entity.end_line,
+                start_byte: entity.start_byte,
+                end_byte: entity.end_byte,
+                structural_hash: entity.structural_hash.unwrap_or(0),
+                // All entities from the base tree are alive — Protected::Referenced.
+                // This ensures that PR additions with matching hashes count as
+                // Global Logic Clones (not Zombie Reintroductions).
+                protected_by: Some(Protection::Referenced),
+            });
+            count += 1;
+        }
+    }
+
+    let rkyv_path = repo_path.join(".janitor").join("symbols.rkyv");
+    registry
+        .save(&rkyv_path)
+        .map_err(|e| anyhow!("symbol hydration: cannot save symbols.rkyv: {e}"))?;
+
+    Ok(count)
+}
+
+// ---------------------------------------------------------------------------
 // WOPR graph builder
 // ---------------------------------------------------------------------------
 
@@ -504,7 +752,7 @@ fn build_wopr_graph(repo_path: &Path) -> Result<Vec<(String, usize, usize)>> {
     let mut ranked: Vec<(String, usize, usize)> = (0..n as u32)
         .map(|idx| {
             let label = graph.label(idx).to_string();
-            let direct = graph.direct_includes(idx).len();
+            let direct = graph.in_degree(idx);
             let reach = graph.transitive_reach(idx);
             (label, direct, reach)
         })
@@ -512,4 +760,29 @@ fn build_wopr_graph(repo_path: &Path) -> Result<Vec<(String, usize, usize)>> {
     ranked.sort_by_key(|(_, _, r)| std::cmp::Reverse(*r));
     ranked.truncate(10);
     Ok(ranked)
+}
+
+// ---------------------------------------------------------------------------
+// Resume helper
+// ---------------------------------------------------------------------------
+
+/// Read all PR numbers already present in `<janitor_dir>/bounce_log.ndjson`.
+///
+/// Returns a `HashSet<u32>` so the caller can filter the harvested PR ref list
+/// in O(1) per entry.  An absent or malformed log returns an empty set —
+/// the caller degrades gracefully to full processing.
+fn load_processed_pr_numbers(janitor_dir: &Path) -> HashSet<u32> {
+    let log_path = janitor_dir.join("bounce_log.ndjson");
+    let content = match std::fs::read_to_string(&log_path) {
+        Ok(s) => s,
+        Err(_) => return HashSet::new(),
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).ok()?;
+            v["pr_number"].as_u64().map(|n| n as u32)
+        })
+        .collect()
 }

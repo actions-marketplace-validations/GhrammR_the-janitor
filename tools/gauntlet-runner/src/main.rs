@@ -134,6 +134,9 @@ struct Config {
     /// packfile fetch, then invokes the libgit2 in-memory bounce engine.
     /// Zero network calls during scoring after the initial fetch.
     hyper: bool,
+    /// When `true`, do not purge existing bounce logs and pass `--resume` to
+    /// `janitor hyper-drive` so interrupted runs continue from where they left off.
+    resume: bool,
 }
 
 fn parse_args() -> Result<Config, String> {
@@ -158,6 +161,7 @@ fn parse_args() -> Result<Config, String> {
     );
     let mut out_dir = PathBuf::from(std::env::var("OUTPUT_DIR").unwrap_or_else(|_| ".".into()));
     let mut hyper = false;
+    let mut resume = false;
 
     let mut i = 1usize;
     while i < args.len() {
@@ -198,12 +202,15 @@ fn parse_args() -> Result<Config, String> {
             "--hyper" => {
                 hyper = true;
             }
+            "--resume" => {
+                resume = true;
+            }
             unknown => {
                 return Err(format!(
                     "Unknown argument: {unknown}\n\
                      Usage: gauntlet-runner [--targets FILE] [--pr-limit N] \
                      [--timeout S] [--janitor PATH] [--gauntlet-dir DIR] [--out-dir DIR] \
-                     [--hyper]"
+                     [--hyper] [--resume]"
                 ));
             }
         }
@@ -218,6 +225,7 @@ fn parse_args() -> Result<Config, String> {
         gauntlet_dir,
         out_dir,
         hyper,
+        resume,
     })
 }
 
@@ -337,6 +345,29 @@ fn main() {
                 // Remove any existing non-git directory (legacy .janitor/ artefacts
                 // or partial runs) — git clone aborts on non-empty targets.
                 if repo_dir.exists() {
+                    // In resume mode: save the existing bounce log before wiping the
+                    // directory so the hyper-drive resume filter can read it after
+                    // the fresh clone.  Prior standard-mode runs leave a .janitor/
+                    // directory (with a valid bounce log) but no .git/ — without this
+                    // save/restore the resume flag would be silently ineffective.
+                    let saved_log: Option<Vec<u8>> = if cfg.resume && log_path.exists() {
+                        match std::fs::read(&log_path) {
+                            Ok(b) => {
+                                eprintln!(
+                                    "  Resume mode: preserving bounce log ({} bytes) across clone",
+                                    b.len()
+                                );
+                                Some(b)
+                            }
+                            Err(e) => {
+                                eprintln!("  warning: Could not read bounce log before clone: {e}");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     eprintln!("  Removing legacy directory before blobless clone...");
                     if let Err(e) = std::fs::remove_dir_all(&repo_dir) {
                         eprintln!(
@@ -345,6 +376,22 @@ fn main() {
                         );
                         total_errors += 1;
                         continue;
+                    }
+
+                    // After removal, immediately restore the bounce log so the
+                    // gauntlet log-retention check and the hyper-drive resume filter
+                    // both see it in the expected location.
+                    if let Some(log_bytes) = saved_log {
+                        let janitor_dir = repo_dir.join(".janitor");
+                        if std::fs::create_dir_all(&janitor_dir).is_ok() {
+                            match std::fs::write(&log_path, &log_bytes) {
+                                Ok(()) => eprintln!(
+                                    "  Resume mode: bounce log restored → {}",
+                                    log_path.display()
+                                ),
+                                Err(e) => eprintln!("  warning: Could not restore bounce log: {e}"),
+                            }
+                        }
                     }
                 }
 
@@ -368,7 +415,58 @@ fn main() {
                     }
                 }
             } else {
-                eprintln!("  Git repo exists, skipping clone.");
+                // Verify the existing clone tracks the correct remote.
+                // A stale or re-used directory might point at the wrong repo.
+                let expected_url = format!("https://github.com/{repo_slug}.git");
+                let actual_url = Command::new("git")
+                    .args(["-C", repo_dir_str, "remote", "get-url", "origin"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+
+                match actual_url.as_deref() {
+                    Some(url) if url == expected_url => {
+                        eprintln!("  Git repo exists and remote matches — reusing clone.");
+                    }
+                    Some(url) => {
+                        eprintln!(
+                            "  warning: Remote mismatch (got `{url}`, expected `{expected_url}`). \
+                             Correcting remote URL..."
+                        );
+                        let fix = Command::new("git")
+                            .args([
+                                "-C",
+                                repo_dir_str,
+                                "remote",
+                                "set-url",
+                                "origin",
+                                &expected_url,
+                            ])
+                            .status();
+                        match fix {
+                            Ok(s) if s.success() => eprintln!("  Remote URL corrected."),
+                            Ok(s) => {
+                                eprintln!(
+                                    "  error: git remote set-url exited {s} — skipping {repo_slug}"
+                                );
+                                total_errors += 1;
+                                continue;
+                            }
+                            Err(e) => {
+                                eprintln!("  error: git remote set-url exec failed: {e} — skipping {repo_slug}");
+                                total_errors += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
+                        eprintln!(
+                            "  warning: Could not determine remote URL for existing clone. \
+                             Proceeding — fetch will fail if the remote is wrong."
+                        );
+                    }
+                }
             }
 
             // Remove the partial-clone blob filter so the subsequent fetch
@@ -403,7 +501,8 @@ fn main() {
             // ── Clean slate: purge stale bounce log ───────────────────────────
             // `janitor hyper-drive` is append-only — purge any residual log from
             // prior runs so ghost entries cannot pollute the aggregate report.
-            if log_path.exists() {
+            // Skipped in --resume mode: the existing log is the resumption state.
+            if !cfg.resume && log_path.exists() {
                 if let Err(e) = std::fs::remove_file(&log_path) {
                     eprintln!(
                         "  warning: Could not purge stale bounce log `{}`: {e}",
@@ -412,6 +511,11 @@ fn main() {
                 } else {
                     eprintln!("  Stale log purged → {}", log_path.display());
                 }
+            } else if cfg.resume && log_path.exists() {
+                eprintln!(
+                    "  Resume mode: retaining existing log → {}",
+                    log_path.display()
+                );
             }
 
             // Phase 2: dual refspec — restore standard branch tracking first,
@@ -516,31 +620,63 @@ fn main() {
             } else {
                 // A Ghost PR (deleted between API harvest and Git fetch) causes
                 // the bulk refspec invocation to fail with exit 128.  Degrade
-                // to individual fetches so the 499 valid PRs still land in the
-                // local packfile — only the ghost is silently abandoned.
+                // to chunked fetches of 100 refs each.  A ghost only contaminates
+                // its own chunk of 100, which then falls back to per-PR fetches
+                // — bounding the worst-case individual requests to 100 instead
+                // of the full PR limit.
+                const CHUNK_SIZE: usize = 100;
+                let chunks: Vec<&[u64]> = pr_numbers.chunks(CHUNK_SIZE).collect();
+                let total_chunks = chunks.len();
                 eprintln!(
                     "  warning: Bulk fetch failed (Ghost PR detected). \
-                     Degrading to fault-tolerant individual fetch..."
+                     Degrading to chunked fetch ({total_chunks} chunks of up to {CHUNK_SIZE})..."
                 );
-                let total = pr_numbers.len();
-                for (idx, pr_num) in pr_numbers.iter().enumerate() {
-                    let current = idx + 1;
-                    eprintln!("  [Fallback] Fetching PR {current}/{total}...");
-                    let refspec =
-                        format!("+refs/pull/{pr_num}/head:refs/remotes/origin/pr/{pr_num}");
-                    let _ = Command::new("git")
-                        .args([
-                            "-C",
-                            repo_dir_str,
-                            "fetch",
-                            "origin",
-                            &refspec,
-                            "--no-tags",
-                            "--force",
-                        ])
+                for (chunk_idx, chunk) in chunks.iter().enumerate() {
+                    let chunk_num = chunk_idx + 1;
+                    eprintln!("  [Fallback] Processing chunk {chunk_num}/{total_chunks}...");
+                    let chunk_refspecs: Vec<String> = chunk
+                        .iter()
+                        .map(|n| format!("+refs/pull/{n}/head:refs/remotes/origin/pr/{n}"))
+                        .collect();
+                    let mut chunk_args = vec![
+                        "-C".to_string(),
+                        repo_dir_str.to_string(),
+                        "fetch".to_string(),
+                        "origin".to_string(),
+                        "--no-tags".to_string(),
+                        "--force".to_string(),
+                        "--quiet".to_string(),
+                    ];
+                    chunk_args.extend(chunk_refspecs.clone());
+                    let chunk_ok = Command::new("git")
+                        .args(&chunk_args)
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
-                        .status();
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if chunk_ok {
+                        eprintln!("  [Chunk] Fetched {} PRs seamlessly.", chunk.len());
+                    } else {
+                        // Ghost PR is within this chunk — iterate 1-by-1.
+                        for pr_num in chunk.iter() {
+                            let refspec =
+                                format!("+refs/pull/{pr_num}/head:refs/remotes/origin/pr/{pr_num}");
+                            let _ = Command::new("git")
+                                .args([
+                                    "-C",
+                                    repo_dir_str,
+                                    "fetch",
+                                    "origin",
+                                    &refspec,
+                                    "--no-tags",
+                                    "--force",
+                                ])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status();
+                        }
+                    }
                 }
                 eprintln!(
                     "  Fault-tolerant fetch complete ({} refs attempted).",
@@ -550,15 +686,19 @@ fn main() {
 
             // Phase 4: memory-mapped strike.
             eprintln!("  Launching hyper-drive (limit={})...", cfg.pr_limit);
+            let mut hd_args = vec![
+                "hyper-drive".to_string(),
+                repo_dir_str.to_string(),
+                "--limit".to_string(),
+                cfg.pr_limit.to_string(),
+                "--repo-slug".to_string(),
+                repo_slug.to_string(),
+            ];
+            if cfg.resume {
+                hd_args.push("--resume".to_string());
+            }
             let status = Command::new(&cfg.janitor_bin)
-                .args([
-                    "hyper-drive",
-                    repo_dir_str,
-                    "--limit",
-                    &cfg.pr_limit.to_string(),
-                    "--repo-slug",
-                    repo_slug,
-                ])
+                .args(&hd_args)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .status();
@@ -575,36 +715,6 @@ fn main() {
                 Err(e) => {
                     eprintln!("  error: hyper-drive exec failed: {e}");
                     total_errors += 1;
-                }
-            }
-
-            // Phase 5: absolute scorch earth — annihilate every entry in
-            // repo_dir EXCEPT `.janitor/` so bounce_log.ndjson survives for
-            // the global aggregation step.  This removes the full 2.5 GB git
-            // packfile database, any accidentally-checked-out source tree, and
-            // any other residual artefacts in a single pass.
-            eprintln!("  Scorch earth: purging all non-.janitor entries...");
-            match std::fs::read_dir(&repo_dir) {
-                Ok(entries) => {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        if name == ".janitor" {
-                            continue; // preserve bounce log
-                        }
-                        let path = entry.path();
-                        let result = if path.is_dir() {
-                            std::fs::remove_dir_all(&path)
-                        } else {
-                            std::fs::remove_file(&path)
-                        };
-                        if let Err(e) = result {
-                            eprintln!("  warning: Could not delete `{}`: {e}", path.display());
-                        }
-                    }
-                    eprintln!("  Scorch complete → only .janitor/ survives");
-                }
-                Err(e) => {
-                    eprintln!("  warning: Could not read repo_dir for scorch: {e}");
                 }
             }
         } else {
@@ -624,7 +734,8 @@ fn main() {
             // `janitor bounce` is append-only — delete any residual log before
             // dispatching the rayon pool so ghost entries from prior runs
             // cannot pollute this repo's aggregate report.
-            if log_path.exists() {
+            // Skipped in --resume mode.
+            if !cfg.resume && log_path.exists() {
                 if let Err(e) = std::fs::remove_file(&log_path) {
                     eprintln!(
                         "  warning: Could not purge stale bounce log `{}`: {e}",

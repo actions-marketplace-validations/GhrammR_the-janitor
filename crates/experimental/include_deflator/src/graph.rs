@@ -136,6 +136,17 @@ impl IncludeGraph {
     pub fn direct_includes(&self, node: NodeIdx) -> Vec<NodeIdx> {
         self.csr.edges(node).map(|e| e.target()).collect()
     }
+
+    /// Number of files that directly include `node` (in-degree).
+    ///
+    /// Counts incoming edges by scanning all outgoing edge lists — O(E).
+    /// Acceptable for the top-10 ranking slice produced by [`cmd_hyper_drive`].
+    pub fn in_degree(&self, node: NodeIdx) -> usize {
+        (0..self.csr.node_count() as NodeIdx)
+            .flat_map(|src| self.csr.edges(src))
+            .filter(|e| e.target() == node)
+            .count()
+    }
 }
 
 // ─── Builder ──────────────────────────────────────────────────────────────────
@@ -334,11 +345,13 @@ fn ext_of(path: &str) -> &str {
 }
 
 fn is_cpp_ext(ext: &str) -> bool {
-    matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx")
+    let e = ext.trim_start_matches('.');
+    matches!(e, "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx")
 }
 
 fn is_c_only_ext(ext: &str) -> bool {
-    matches!(ext, "c" | "h")
+    let e = ext.trim_start_matches('.');
+    matches!(e, "c" | "h")
 }
 
 fn is_cpp_file(path: &Path) -> bool {

@@ -102,3 +102,41 @@ pub fn is_semantic_null(base_root: Node, pr_root: Node) -> bool {
     let pr_hash = structural_hash(pr_root);
     base_hash == pr_hash
 }
+
+/// Returns `true` if the full file blobs produce identical structural skeletons.
+///
+/// Parses both byte slices with `language`, then delegates to [`is_semantic_null`].
+/// Returns `false` on any parse failure or if either tree contains error nodes
+/// (indicating the grammar could not cleanly parse the file — unsafe to conclude null).
+///
+/// # Parameters
+/// - `old_bytes`: Raw bytes of the file at the base/merge-base commit.
+/// - `new_bytes`: Raw bytes of the file at the PR head commit.
+/// - `language`: The tree-sitter grammar to use for both parses.
+pub fn is_semantic_null_blobs(
+    old_bytes: &[u8],
+    new_bytes: &[u8],
+    language: &tree_sitter::Language,
+) -> bool {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(language).is_err() {
+        return false;
+    }
+
+    let old_tree = match parser.parse(old_bytes, None) {
+        Some(t) => t,
+        None => return false,
+    };
+    let new_tree = match parser.parse(new_bytes, None) {
+        Some(t) => t,
+        None => return false,
+    };
+
+    // Reject if either parse produced error nodes — structural comparison is
+    // unreliable on incomplete/invalid ASTs.
+    if old_tree.root_node().has_error() || new_tree.root_node().has_error() {
+        return false;
+    }
+
+    is_semantic_null(old_tree.root_node(), new_tree.root_node())
+}

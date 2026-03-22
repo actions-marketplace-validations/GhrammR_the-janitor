@@ -24,19 +24,19 @@
 //!
 //! ## Scoring Formula
 //! ```text
-//! SlopScore = (dead_symbols_added × 10) + (logic_clones_found × 5)
-//!           + (zombie_symbols_added × 15) + (antipatterns_found.min(10) × 50)
+//! SlopScore = (logic_clones_found      ×  5)
+//!           + (zombie_symbols_added    × 10)   // Warning tier
+//!           + antipattern_score.min(500)        // sum of per-finding Severity::points()
 //!           + (hallucinated_security_fix × 100)
-//! `antipatterns_found` is capped at 10 per PR to prevent runaway inflation
-//! from generated FFI bindings or large auto-templated files.
 //! ```
-//! Dead-symbol additions (×10) penalise name-based re-introduction.
-//! Logic clones (×5) penalise structural duplication within the patch (exact BLAKE3 or fuzzy
-//! SimHash in the Zombie band 0.85–0.95) or against the registry (Global Logic Clone).
-//! Zombie reintroductions (×15) carry the highest penalty: the body hash proves the function
-//! was copied verbatim from a previously-deleted dead symbol.
-//! Antipatterns (×50) penalise language-specific slop detected by [`slop_hunter`]:
-//! hallucinated imports, vacuous unsafe blocks, goroutine closure traps.
+//! Antipattern scoring is stratified by [`crate::slop_hunter::Severity`]:
+//! - `Critical` (50 pts): AST-Bombs, `eval()`, `gets()`, open CIDR rules, K8s wildcard hosts.
+//! - `Warning`  (10 pts): Vacuous `unsafe`, empty catch blocks, hallucinated imports.
+//! - `Lint`     ( 0 pts): `async void`, unquoted bash variables, goroutine closure traps.
+//!
+//! The `antipattern_score` field accumulates these per-finding values; `antipatterns_found`
+//! remains the raw count for reporting purposes.  `antipattern_score` is capped at 500 pts
+//! (equivalent to 10 Critical findings) to prevent runaway score inflation.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -54,10 +54,9 @@ use common::registry::SymbolRegistry;
 ///
 /// ## Formula
 /// ```text
-/// score = (dead_symbols_added      × 10)
-///       + (logic_clones_found      ×  5)
-///       + (zombie_symbols_added    × 15)
-///       + (antipatterns_found.min(10) × 50)   — capped at 10 per PR
+/// score = (logic_clones_found      ×  5)
+///       + (zombie_symbols_added    × 10)   — Warning tier
+///       + antipattern_score.min(500)        — sum of per-finding Severity::points()
 ///       + (comment_violations      ×  5)
 ///       + (unlinked_pr             × 20)
 ///       + (hallucinated_security_fix × 100)
@@ -80,15 +79,25 @@ pub struct SlopScore {
     /// (unprotected) symbol in the registry.
     ///
     /// A zombie reintroduction proves the function body was copied from a previously
-    /// deleted symbol — the highest-severity slop category (weight ×15).
+    /// deleted symbol — Warning-tier slop (weight ×10).
     pub zombie_symbols_added: u32,
     /// Number of language-specific antipatterns detected by [`crate::slop_hunter`]:
     /// hallucinated imports, vacuous unsafe blocks, goroutine closure traps, etc.
     ///
-    /// Each antipattern carries a weight of ×50 — the highest per-item penalty —
-    /// because these patterns indicate systemic slop that structural hashing cannot
-    /// catch (e.g. an import that is syntactically valid but semantically dead).
+    /// Raw count for reporting; does not directly drive scoring.  See
+    /// [`antipattern_score`](Self::antipattern_score) for the weighted total.
     pub antipatterns_found: u32,
+
+    /// Weighted point sum for all accepted antipattern findings.
+    ///
+    /// Each finding contributes `severity.points()` to this total:
+    /// - `Critical` → 50 pts (AST-Bombs, `eval()`, `gets()`, open CIDR, K8s wildcard hosts)
+    /// - `Warning`  → 10 pts (vacuous `unsafe`, empty catch, hallucinated imports)
+    /// - `Lint`     →  0 pts (`async void`, unquoted Bash vars, goroutine traps)
+    ///
+    /// This field is what [`Self::score()`] uses, not `antipatterns_found × 50`.
+    /// Capped at 500 in `score()` to prevent runaway inflation.
+    pub antipattern_score: u32,
     /// Number of banned phrases (AI-isms, profanity) found in added comment lines.
     ///
     /// Detected by [`crate::metadata::CommentScanner::scan_patch`].
@@ -171,15 +180,13 @@ impl SlopScore {
         // pairs is already conclusively slop at 250 points; the ceiling adds
         // no information beyond that.
         let clamped_clones = self.logic_clones_found.min(50);
-        // Clamp antipatterns_found to 10 to prevent score explosion from
-        // generated FFI bindings or large auto-templated files that legitimately
-        // use the same pattern hundreds of times (e.g. Godot C++ allocations,
-        // bindgen output).  10 antipatterns × 50 = 500 pts maximum contribution.
-        let clamped_antipatterns = self.antipatterns_found.min(10);
-        self.dead_symbols_added * 10
-            + clamped_clones * 5
-            + self.zombie_symbols_added * 15
-            + clamped_antipatterns * 50
+        // Cap antipattern_score at 500 pts (equivalent to 10 Critical findings)
+        // to prevent score explosion from generated FFI bindings or large
+        // auto-templated files that legitimately trigger the same pattern many times.
+        let capped_antipattern_score = self.antipattern_score.min(500);
+        clamped_clones * 5
+            + self.zombie_symbols_added * 10
+            + capped_antipattern_score
             + self.comment_violations * 5
             + self.unlinked_pr * 20
             + self.hallucinated_security_fix * 100
@@ -187,8 +194,7 @@ impl SlopScore {
 
     /// Returns `true` when no slop was detected.
     pub fn is_clean(&self) -> bool {
-        self.dead_symbols_added == 0
-            && self.logic_clones_found == 0
+        self.logic_clones_found == 0
             && self.zombie_symbols_added == 0
             && self.antipatterns_found == 0
             && self.comment_violations == 0
@@ -399,31 +405,6 @@ fn extract_patch_path(patch: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// SlopRule — domain-masked antipattern carrier
-// ---------------------------------------------------------------------------
-
-/// Internal wrapper that pairs an antipattern finding with its applicable
-/// [`crate::metadata::DOMAIN_*`] bitmask for the S-expression rule matrix.
-///
-/// [`PatchBouncer::bounce`] evaluates each rule against the classified domain
-/// of the file under analysis:
-///
-/// ```text
-/// if (rule.domain_mask & file_domain) != 0 { emit finding }
-/// ```
-///
-/// Rules with [`crate::metadata::DOMAIN_ALL`] fire on every file (supply-chain
-/// and infrastructure checks).  Rules with [`crate::metadata::DOMAIN_FIRST_PARTY`]
-/// are memory-safety and code-quality gates that only apply to code you own —
-/// vendored and test files are exempt.
-struct SlopRule {
-    /// The antipattern finding to potentially emit.
-    finding: crate::slop_hunter::SlopFinding,
-    /// Bitmask of domains for which this rule is active.
-    domain_mask: u8,
-}
-
-// ---------------------------------------------------------------------------
 // PatchBouncer (default implementation)
 // ---------------------------------------------------------------------------
 
@@ -506,6 +487,18 @@ impl PRBouncer for PatchBouncer {
                     return Ok(SlopScore::default());
                 }
 
+                // Binary asset bypass: known binary formats always trigger the
+                // ByteLatticeAnalyzer entropy classifier as AnomalousBlob, producing
+                // false positives for font files, images, archives, and WASM blobs.
+                // Skip them entirely before the entropy gate runs.
+                const BINARY_ASSET_EXTS: &[&str] = &[
+                    "wasm", "woff", "woff2", "eot", "ttf", "png", "jpg", "jpeg", "gif", "ico",
+                    "zip", "gz", "tar", "pdf",
+                ];
+                if BINARY_ASSET_EXTS.contains(&ext) {
+                    return Ok(SlopScore::default());
+                }
+
                 // Unknown / unsupported language — run agnostic shield on added bytes.
                 let added: String = patch
                     .lines()
@@ -524,6 +517,7 @@ impl PRBouncer for PatchBouncer {
                         // from the stored detail fields).
                         return Ok(SlopScore {
                             antipatterns_found: 1,
+                            antipattern_score: 50, // Critical — embedded binary / generated data
                             antipattern_details: vec![format!(
                                 "AnomalousBlob: high-entropy or non-text content detected \
                                  in .{ext} patch section — possible embedded binary or \
@@ -551,13 +545,13 @@ impl PRBouncer for PatchBouncer {
 
         let source = added.as_bytes();
 
-        // Circuit breaker: skip tree-sitter AST work for patch sections > 256 KB.
-        // The Rust compiler and other mega-repos contain AST bombs (auto-generated
-        // match arms, macro expansions) that can crash tree-sitter regardless of
-        // stack size.  256 KB is the empirical ceiling for well-formed hand-authored
+        // Circuit breaker: skip tree-sitter AST work for patch sections > 64 KB.
+        // The Rust compiler test suite contains AST bombs (auto-generated match
+        // arms, macro expansions) that trigger tree-sitter stack overflows even
+        // below 256 KB.  64 KB is the empirical safe ceiling for hand-authored
         // diffs; beyond it the content is overwhelmingly generated (P/Invoke
-        // bindings, protobuf stubs, WASM glue).
-        if source.len() > 256 * 1024 {
+        // bindings, protobuf stubs, WASM glue, test fixtures).
+        if source.len() > 64 * 1024 {
             return Ok(SlopScore::default());
         }
 
@@ -581,6 +575,20 @@ impl PRBouncer for PatchBouncer {
             } else {
                 vec![]
             }
+        };
+
+        // Compiled Payload Shield — byte-level binary threat scan.
+        //
+        // Runs a single O(N) AhoCorasick pass over the raw added-source bytes,
+        // scanning for mining-pool stratum URIs, ELF/WASM/PE binary magic, and
+        // NUL-terminated shell execution paths embedded in the diff.
+        // Each finding is Critical-tier (+50 pts) and accumulates alongside NCD
+        // and AST antipatterns in the final score assembly.
+        let payload_findings: Vec<String> = {
+            advanced_threats::binary_hunter::scan(source)
+                .into_iter()
+                .map(|t| format!("{} (byte_offset={})", t.description, t.byte_offset))
+                .collect()
         };
 
         let mut parser = tree_sitter::Parser::new();
@@ -636,18 +644,22 @@ impl PRBouncer for PatchBouncer {
         let file_domain = crate::metadata::DomainRouter::classify(&file_path);
 
         // Language-specific antipattern detection via slop_hunter.
-        // Wrap each finding in a SlopRule and apply the domain bitmask matrix.
+        // Apply the domain bitmask matrix, then the severity-based test-domain filter.
         let raw_findings = crate::slop_hunter::find_slop(ext, source);
         let mut suppressed_by_domain: u32 = 0;
+        let mut antipattern_score: u32 = 0;
         let mut accepted: Vec<crate::slop_hunter::SlopFinding> =
             Vec::with_capacity(raw_findings.len());
         for f in raw_findings {
-            let rule = SlopRule {
-                domain_mask: f.domain,
-                finding: f,
-            };
-            if (rule.domain_mask & file_domain) != 0 {
-                accepted.push(rule.finding);
+            let passes_domain = (f.domain & file_domain) != 0;
+            // Test domain exemption (Phase 3): on test-path files, Warning and Lint
+            // findings are suppressed — test code is allowed to be structurally
+            // vacuous or cloned.  Only Critical findings fire unconditionally.
+            let passes_severity = file_domain != crate::metadata::DOMAIN_TEST
+                || f.severity == crate::slop_hunter::Severity::Critical;
+            if passes_domain && passes_severity {
+                antipattern_score += f.severity.points();
+                accepted.push(f);
             } else {
                 suppressed_by_domain += 1;
             }
@@ -886,16 +898,22 @@ impl PRBouncer for PatchBouncer {
             raw_clone_count
         };
 
-        // Merge NCD entropy gate findings into the antipattern totals.
-        let antipatterns_found = antipatterns_found + ncd_findings.len() as u32;
+        // Merge NCD entropy gate and Compiled Payload Shield findings into the
+        // antipattern totals.  Both gate types are Critical tier (50 pts each).
+        let ncd_count = ncd_findings.len() as u32;
+        let payload_count = payload_findings.len() as u32;
+        let antipatterns_found = antipatterns_found + ncd_count + payload_count;
+        let antipattern_score = antipattern_score + ncd_count * 50 + payload_count * 50;
         let mut antipattern_details = antipattern_details;
         antipattern_details.extend(ncd_findings);
+        antipattern_details.extend(payload_findings);
 
         Ok(SlopScore {
             dead_symbols_added,
             logic_clones_found,
             zombie_symbols_added,
             antipatterns_found,
+            antipattern_score,
             antipattern_details,
             suppressed_by_domain,
             necrotic_flag,
@@ -1012,6 +1030,136 @@ pub fn extract_patch_blobs(patch: &str) -> HashMap<std::path::PathBuf, Vec<u8>> 
     blobs
 }
 
+// ---------------------------------------------------------------------------
+// Full-blob Semantic Null pre-check
+// ---------------------------------------------------------------------------
+
+/// Map a file extension to a tree-sitter [`Language`] for full-blob semantic null
+/// analysis.  Returns `None` for unsupported extensions — those files are skipped
+/// by [`semantic_null_pr_check`] (neither classified as null nor as structural).
+fn lang_for_ext_semantic(ext: &str) -> Option<tree_sitter::Language> {
+    match ext {
+        "py" => Some(tree_sitter_python::LANGUAGE.into()),
+        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
+        "cpp" | "cxx" | "cc" | "h" | "hpp" | "c" => Some(tree_sitter_cpp::LANGUAGE.into()),
+        "java" => Some(tree_sitter_java::LANGUAGE.into()),
+        "cs" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        "js" | "jsx" => Some(tree_sitter_javascript::LANGUAGE.into()),
+        "rb" => Some(tree_sitter_ruby::LANGUAGE.into()),
+        "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
+        "swift" => Some(tree_sitter_swift::LANGUAGE.into()),
+        "lua" => Some(tree_sitter_lua::LANGUAGE.into()),
+        "scala" => Some(tree_sitter_scala::LANGUAGE.into()),
+        "sh" | "bash" => Some(tree_sitter_bash::LANGUAGE.into()),
+        "m" | "mm" => Some(tree_sitter_objc::LANGUAGE.into()),
+        _ => None,
+    }
+}
+
+/// Returns `true` if **all** modified source files in the PR have structurally
+/// identical AST skeletons between their base-commit blob and head-commit blob.
+///
+/// Uses `git2` to compute `diff_tree_to_tree` between `merge_base_sha` and
+/// `pr_sha`, then for each modified file with a supported extension loads both
+/// blobs from the ODB and calls
+/// [`backlog_pruner::semantic_null::is_semantic_null_blobs`].
+///
+/// Returns `false` (not semantic null) if:
+/// - The repository cannot be opened.
+/// - No supported source files are modified.
+/// - Any modified source file differs structurally.
+/// - Any blob exceeds the 256 KiB circuit breaker.
+/// - Any parse produces error nodes.
+pub fn semantic_null_pr_check(repo_path: &Path, merge_base_sha: &str, pr_sha: &str) -> bool {
+    use backlog_pruner::semantic_null::is_semantic_null_blobs;
+
+    const BLOB_LIMIT: usize = 256 * 1024;
+
+    let repo = match git2::Repository::open(repo_path) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    let base_oid = match git2::Oid::from_str(merge_base_sha) {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let head_oid = match git2::Oid::from_str(pr_sha) {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+
+    let base_commit = match repo.find_commit(base_oid) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let head_commit = match repo.find_commit(head_oid) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let base_tree = match base_commit.tree() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let head_tree = match head_commit.tree() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+
+    let diff = match repo.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+
+    // Collect all deltas for modified source files.
+    let mut checked_any = false;
+    for delta in diff.deltas() {
+        use git2::Delta;
+        // Only examine modifications — additions/deletions are not semantic-null candidates.
+        if delta.status() != Delta::Modified {
+            continue;
+        }
+        let path = match delta.new_file().path() {
+            Some(p) => p,
+            None => continue,
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let lang = match lang_for_ext_semantic(ext) {
+            Some(l) => l,
+            None => continue, // unsupported extension — skip
+        };
+
+        let old_oid = delta.old_file().id();
+        let new_oid = delta.new_file().id();
+
+        let old_blob = match repo.find_blob(old_oid) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let new_blob = match repo.find_blob(new_oid) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+
+        let old_bytes = old_blob.content();
+        let new_bytes = new_blob.content();
+
+        // 256 KiB circuit breaker — over-large blobs are not safe to assume null.
+        if old_bytes.len() > BLOB_LIMIT || new_bytes.len() > BLOB_LIMIT {
+            return false;
+        }
+
+        if !is_semantic_null_blobs(old_bytes, new_bytes, &lang) {
+            return false;
+        }
+        checked_any = true;
+    }
+
+    // If no supported source files were modified, do not classify as semantic null.
+    checked_any
+}
+
 /// Analyse a pull request's changes against `registry` by loading changed blobs
 /// directly from the git pack index via [`shadow_git::simulate_merge`].
 ///
@@ -1067,7 +1215,37 @@ pub fn bounce_git(
             continue; // Circuit breaker — skip oversized blobs.
         }
 
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        // Hard binary-asset bypass: check the full path string so multi-dot
+        // extensions (e.g. `.woff2`) and paths without OS-reported extensions
+        // are caught reliably, regardless of how path.extension() resolves them.
+        {
+            let path_str = path.to_string_lossy().to_lowercase();
+            if path_str.ends_with(".wasm")
+                || path_str.ends_with(".woff")
+                || path_str.ends_with(".woff2")
+                || path_str.ends_with(".eot")
+                || path_str.ends_with(".ttf")
+                || path_str.ends_with(".png")
+                || path_str.ends_with(".jpg")
+                || path_str.ends_with(".jpeg")
+                || path_str.ends_with(".gif")
+                || path_str.ends_with(".ico")
+                || path_str.ends_with(".zip")
+                || path_str.ends_with(".gz")
+                || path_str.ends_with(".tar")
+                || path_str.ends_with(".pdf")
+            {
+                continue;
+            }
+        }
+
+        // Explicitly extract the path as a UTF-8 string from the delta path so
+        // `extract_patch_ext` and the `BINARY_ASSET_EXTS` bypass inside
+        // `PatchBouncer::bounce` can parse the `+++ b/<path>` header correctly.
+        // `path.display()` may produce a lossy OsStr representation on platforms
+        // where the path contains non-UTF-8 bytes; `to_str()` is strict and we
+        // fall back to `""` so the file is analysed as extension-less (safe).
+        let path_str = path.to_str().unwrap_or("");
 
         // Synthesise a virtual unified diff from the blob content.
         let raw = std::str::from_utf8(blob_bytes).unwrap_or("");
@@ -1082,21 +1260,19 @@ pub fn bounce_git(
             continue;
         }
 
-        let fake_patch = format!(
-            "--- a/{path}\n+++ b/{path}\n@@ -0,0 +1 @@\n{added_lines}",
-            path = path.display()
-        );
+        let fake_patch =
+            format!("--- a/{path_str}\n+++ b/{path_str}\n@@ -0,0 +1 @@\n{added_lines}");
 
         if let Ok(mut score) = PatchBouncer.bounce(&fake_patch, registry) {
             total.dead_symbols_added += score.dead_symbols_added;
             total.logic_clones_found += score.logic_clones_found;
             total.zombie_symbols_added += score.zombie_symbols_added;
             total.antipatterns_found += score.antipatterns_found;
+            total.antipattern_score += score.antipattern_score;
             total.suppressed_by_domain += score.suppressed_by_domain;
             total
                 .antipattern_details
                 .append(&mut score.antipattern_details);
-            let _ = ext; // used indirectly through fake_patch header
         }
     }
 
@@ -1178,7 +1354,8 @@ mod tests {
         let bouncer = PatchBouncer;
         let score = bouncer.bounce(&patch, &registry).unwrap();
         assert_eq!(score.dead_symbols_added, 1);
-        assert_eq!(score.score(), 10);
+        // dead_symbols_added no longer contributes to score (Necrotic Pruning Matrix handles dead-code).
+        assert_eq!(score.score(), 0);
     }
 
     #[test]
@@ -1258,23 +1435,44 @@ mod tests {
             logic_clones_found: 3,
             ..SlopScore::default()
         };
-        assert_eq!(s.score(), 2 * 10 + 3 * 5); // 35
+        // dead_symbols_added no longer contributes to score.
+        assert_eq!(s.score(), 3 * 5); // 15
 
-        // Zombie weight is ×15.
+        // Zombie weight is ×10 (Warning tier).
         let z = SlopScore {
             zombie_symbols_added: 2,
             ..SlopScore::default()
         };
-        assert_eq!(z.score(), 2 * 15); // 30
+        assert_eq!(z.score(), 2 * 10); // 20
         assert!(!z.is_clean());
 
-        // Antipattern weight is ×50.
+        // Antipattern score drives the formula, not antipatterns_found × 50.
+        // One Critical finding = 50 pts.
         let a = SlopScore {
             antipatterns_found: 1,
+            antipattern_score: 50,
             ..SlopScore::default()
         };
         assert_eq!(a.score(), 50);
         assert!(!a.is_clean());
+
+        // One Warning finding = 10 pts.
+        let w = SlopScore {
+            antipatterns_found: 1,
+            antipattern_score: 10,
+            ..SlopScore::default()
+        };
+        assert_eq!(w.score(), 10);
+        assert!(!w.is_clean());
+
+        // Lint findings = 0 pts, but still count for is_clean.
+        let l = SlopScore {
+            antipatterns_found: 1,
+            antipattern_score: 0,
+            ..SlopScore::default()
+        };
+        assert_eq!(l.score(), 0);
+        assert!(!l.is_clean()); // antipatterns_found != 0
 
         // Comment violation weight is ×5.
         let c = SlopScore {
@@ -1347,7 +1545,7 @@ mod tests {
             score.zombie_symbols_added, 1,
             "zombie reintroduction must be detected"
         );
-        assert_eq!(score.score(), 15, "zombie weight is ×15");
+        assert_eq!(score.score(), 10, "zombie weight is ×10 (Warning tier)");
         assert!(!score.is_clean());
     }
 
@@ -1492,15 +1690,60 @@ mod tests {
         assert_eq!(exts, vec![""], "LICENSE has no extension → empty string");
     }
 
+    // ── Compiled Payload Shield integration tests ─────────────────────────────
+
+    #[test]
+    fn test_payload_shield_stratum_in_rust_patch() {
+        // A Rust source file embedding a stratum mining pool URI should trigger
+        // the Compiled Payload Shield at the PatchBouncer level.
+        let src = "const POOL: &str = \"stratum+tcp://pool.example.com:3333\";\n";
+        let patch = make_patch("config.rs", src);
+        let score = PatchBouncer.bounce(&patch, &empty_registry()).unwrap();
+        assert!(
+            score.antipatterns_found >= 1,
+            "stratum+tcp:// must trigger payload shield: {:?}",
+            score.antipattern_details
+        );
+        assert!(
+            score
+                .antipattern_details
+                .iter()
+                .any(|d| d.contains("stratum")),
+            "stratum finding must appear in antipattern_details"
+        );
+        assert!(
+            score.antipattern_score >= 50,
+            "stratum finding must contribute Critical-tier pts (50)"
+        );
+    }
+
+    #[test]
+    fn test_payload_shield_clean_source_not_flagged() {
+        // Ordinary Rust source code must not trigger the payload shield.
+        let src = "fn compute(a: i32, b: i32) -> i32 { a + b }\n";
+        let patch = make_patch("math.rs", src);
+        let score = PatchBouncer.bounce(&patch, &empty_registry()).unwrap();
+        // NCD and payload shields must both be silent on trivial clean source.
+        let payload_flags: Vec<&String> = score
+            .antipattern_details
+            .iter()
+            .filter(|d| d.contains("compiled_payload"))
+            .collect();
+        assert!(
+            payload_flags.is_empty(),
+            "clean source must not trigger payload shield: {payload_flags:?}"
+        );
+    }
+
     #[test]
     fn test_hallucinated_fix_score_formula() {
         // Verify the new ×100 weight integrates correctly with other fields.
         let s = SlopScore {
-            dead_symbols_added: 1,        // +10
+            dead_symbols_added: 1,        // +0 (dead_symbols no longer scored)
             hallucinated_security_fix: 1, // +100
             ..SlopScore::default()
         };
-        assert_eq!(s.score(), 110);
+        assert_eq!(s.score(), 100);
         assert!(!s.is_clean());
     }
 

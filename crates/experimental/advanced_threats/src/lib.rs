@@ -21,9 +21,16 @@
 //!   plus `tree-sitter-bash` structural AST analysis for `/tmp/` / `/dev/shm/`
 //!   staging-area binary execution.
 //!
-//! **ISOLATION GUARANTEE**: No module is wired into `PatchBouncer::bounce`,
-//! `slop_hunter.rs`, or any production CLI pipeline. These are standalone prototypes.
+//! - [`binary_hunter`]: Compiled Payload Shield. O(N) AhoCorasick scan for mining-pool
+//!   stratum URIs, ELF/WASM/PE binary magic, and NUL-terminated shell execution paths
+//!   embedded in diff blobs.  **Production-graduated**: wired into `PatchBouncer::bounce`
+//!   in `forge::slop_filter` as of v7.6.1.
+//!
+//! **ISOLATION GUARANTEE**: `blast_radius`, `yggdrasil`, `unicode_gate`, and `lotl_hunter`
+//! remain standalone prototypes — not wired into `PatchBouncer::bounce` or any production
+//! pipeline.  `binary_hunter` is the first graduated module.
 
+pub mod binary_hunter;
 pub mod blast_radius;
 pub mod lotl_hunter;
 pub mod unicode_gate;

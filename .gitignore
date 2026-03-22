@@ -239,6 +239,8 @@ package-lock.json
 *.mp4
 *.patch
 *.ndjson
+# Gauntlet variant target lists (operator-local, not committed)
+gauntlet_targets_*.txt
 
 # Whitelist: official docs assets are intentionally tracked.
 !docs/assets/*.pdf

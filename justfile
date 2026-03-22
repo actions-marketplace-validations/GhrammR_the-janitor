@@ -120,9 +120,9 @@ run-gauntlet *ARGS:
 	cargo build --release -p gauntlet-runner
 	./target/release/gauntlet-runner {{ARGS}}
 
-# Hyper-Gauntlet — libgit2 O(1) network-bypass omni-strike across all targets.
+# Hyper-Gauntlet — libgit2 O(1) network-bypass global audit across all targets.
 #
-# Clones each repo once (blobless), populates refs/remotes/origin/pr/*, then
+# Clones each repo once, populates refs/remotes/origin/pr/*, then
 # scores every PR directly from the packfile — zero `gh pr diff` subshells.
 #
 # Usage:
@@ -138,7 +138,6 @@ hyper-gauntlet *ARGS:
 	    exec nix develop --command just hyper-gauntlet {{ARGS}}
 	fi
 	cargo build --release -p gauntlet-runner -p cli
-	rm -rf ~/dev/gauntlet/* || true
 	./target/release/gauntlet-runner --hyper --pr-limit 5000 {{ARGS}}
 
 # 6. DOCUMENTATION

@@ -201,13 +201,13 @@ enum Commands {
         /// Project root (reads .janitor/symbols.rkyv).
         ///
         /// When `--wopr` is set this becomes the gauntlet base directory.
-        /// Defaults to `~/dev/gauntlet/` when omitted in WOPR mode.
+        /// Defaults to `~/dev/gauntlet/` when omitted in dashboard mode.
         path: Option<PathBuf>,
-        /// Launch the WOPR Defcon Interface multi-tenant command center.
+        /// Launch the Integrity Dashboard multi-tenant operations center.
         ///
-        /// Opens a target-selection menu over all repositories found under the
-        /// gauntlet base directory.  Navigate with ↑/↓, lock on with Enter,
-        /// return with Esc/Backspace, quit with q.
+        /// Opens a repository-selection menu over all repositories found under
+        /// the gauntlet base directory.  Navigate with ↑/↓, select with Enter,
+        /// change tabs with ←/→, return with Esc/Backspace, quit with q.
         #[arg(long)]
         wopr: bool,
     },
@@ -395,6 +395,13 @@ enum Commands {
         /// Defaults to the directory name of `path` when omitted.
         #[arg(long)]
         repo_slug: Option<String>,
+        /// Resume an interrupted run: skip PRs already present in the bounce log.
+        ///
+        /// Reads `.janitor/bounce_log.ndjson`, extracts all recorded PR numbers,
+        /// and filters them from the harvest list before the rayon pool starts.
+        /// Mathematically guarantees no PR is bounced twice.
+        #[arg(long, default_value = "false")]
+        resume: bool,
     },
 }
 
@@ -501,7 +508,7 @@ async fn main() -> anyhow::Result<()> {
                         .join("gauntlet")
                 });
                 dashboard::wopr_view::draw_wopr(&base)
-                    .map_err(|e| anyhow::anyhow!("WOPR TUI error: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("Dashboard TUI error: {e}"))?;
             } else {
                 let p = path
                     .as_deref()
@@ -595,9 +602,14 @@ async fn main() -> anyhow::Result<()> {
             limit,
             base_branch,
             repo_slug,
-        } => {
-            git_drive::cmd_hyper_drive(path, *limit, base_branch.as_deref(), repo_slug.as_deref())?
-        }
+            resume,
+        } => git_drive::cmd_hyper_drive(
+            path,
+            *limit,
+            base_branch.as_deref(),
+            repo_slug.as_deref(),
+            *resume,
+        )?,
     }
 
     Ok(())
