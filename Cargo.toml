@@ -98,7 +98,7 @@ git2 = "0.20"
 rayon = "1.10"
 
 # Progress reporting
-indicatif = "0.17"
+indicatif = "0.18"
 
 [profile.release]
 # Size-first: tree-sitter grammar tables dominate binary weight.
