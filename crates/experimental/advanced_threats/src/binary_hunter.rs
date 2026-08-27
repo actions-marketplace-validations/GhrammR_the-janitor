@@ -30,7 +30,7 @@
 
 use std::sync::OnceLock;
 
-use aho_corasick::{AhoCorasick, MatchKind};
+use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -99,6 +99,92 @@ const PATTERNS: &[(&[u8], &str)] = &[
         b"cmd.exe\x00",
         "security:compiled_payload_anomaly — NUL-terminated cmd.exe string (shell execution artifact)",
     ),
+    // ── Agentic hostile obfuscation patterns ─────────────────────────────────
+    // `eval(base64_decode(` is the canonical JS/Python obfuscation idiom used
+    // to hide hostile payloads from static analysis — the encoded string is
+    // decoded at runtime and exec'd directly.  No legitimate application code
+    // uses this pattern outside of security research.
+    //
+    // `exec(zlib.decompress(` is the Python equivalent: a zlib-compressed
+    // payload is decompressed and executed in-process.  Common in dropper
+    // scripts and agentic C2 stubs targeting Python runtimes.
+    (
+        b"eval(base64_decode(",
+        "security:compiled_payload_anomaly — eval(base64_decode( obfuscation (JS/Python in-process decode-and-exec)",
+    ),
+    (
+        b"exec(zlib.decompress(",
+        "security:compiled_payload_anomaly — exec(zlib.decompress( payload delivery (Python compressed dropper)",
+    ),
+    // ── Credential headers ────────────────────────────────────────────────────
+    // AWS IAM Access Key IDs always begin with the literal prefix `AKIA`
+    // followed by 16 uppercase alphanumeric characters.  `AKIA` is the
+    // deterministic AhoCorasick trigger; the 4-char prefix appearing verbatim
+    // in a diff blob is anomalous in all known legitimate source contexts.
+    (
+        b"AKIA",
+        "security:credential_leak — AWS IAM Access Key ID prefix (AKIA…); rotate this key immediately",
+    ),
+    // PEM-armored RSA private keys embedded in a diff are an immediate
+    // credential exfiltration vector.  The full header is a fixed string —
+    // an exact AhoCorasick match with zero false-positive surface.
+    (
+        b"-----BEGIN RSA PRIVATE KEY-----",
+        "security:credential_leak — RSA private key PEM header detected; never commit private keys",
+    ),
+    // Stripe live secret keys begin with the deterministic prefix `sk_live_`
+    // followed by 24 alphanumeric characters.  Test-mode keys (`sk_test_`)
+    // are not flagged — only live keys represent active credential exposure.
+    (
+        b"sk_live_",
+        "security:credential_leak — Stripe live secret key prefix (sk_live_…); revoke immediately",
+    ),
+    // ── Supply-chain integrity patterns ──────────────────────────────────────
+    // `<script src="http` fires on both `http://` (always wrong — cleartext
+    // resource loading) and `https://` (acceptable only when accompanied by
+    // an SRI `integrity="sha…"` attribute).  Any external script tag without
+    // SRI is a supply-chain attack surface: a CDN compromise, DNS hijack, or
+    // BGP hijack can silently replace the loaded JS with an adversarial payload
+    // affecting every user of the page.  Pattern catches the common prefix;
+    // the `https` variant is deliberately included because HTTPS alone
+    // provides transport security but not content integrity.
+    (
+        b"<script src=\"http",
+        "security:unpinned_asset — <script src=\"http\u{2026}\" loads an external script without \
+         Subresource Integrity (integrity=\"sha\u{2026}\"); CDN or DNS hijack can inject arbitrary \
+         code into all consumers of this page",
+    ),
+    // GitHub Pages `.github.io/` URLs embedded in production source couple the
+    // application to personal or organisation GitHub Pages deployments — not a
+    // CDN.  These endpoints have no SLA, can be taken over if the owning org is
+    // renamed or deleted, and carry no content-integrity guarantee.  Legitimate
+    // library dependencies belong in package.json or Cargo.toml, not hard-coded.
+    (
+        b".github.io/",
+        "security:unpinned_asset — .github.io/ URL embedded in production source; \
+         GitHub Pages is not a CDN and has no integrity guarantee — \
+         use a versioned package dependency instead",
+    ),
+    // ── XZ Utils backdoor DNA (CVE-2024-3094) ─────────────────────────────
+    // The XZ Utils supply-chain backdoor used `eval $(echo ...)` to obfuscate
+    // malicious commands injected into the autotools build script.  This pattern
+    // does not appear in any legitimate build system.
+    (
+        b"eval $(echo ",
+        "security:obfuscated_build_script — eval of base64-encoded subshell \
+         (XZ Utils backdoor DNA; CVE-2024-3094 build script pattern); \
+         eval $(echo ...) is used exclusively for obfuscated command execution",
+    ),
+    // Decoding a base64 blob and piping the result directly to bash executes
+    // arbitrary encoded payloads at build time — never appears in legitimate
+    // build scripts.  Second obfuscation vector from CVE-2024-3094.
+    (
+        b"| base64 -d | bash",
+        "security:obfuscated_build_script — base64 decode pipeline piped to bash \
+         (XZ Utils backdoor DNA; CVE-2024-3094 build script pattern); \
+         this executes arbitrary encoded payloads at build time — \
+         never appears in legitimate build scripts",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -110,6 +196,7 @@ static PAYLOAD_AC: OnceLock<AhoCorasick> = OnceLock::new();
 fn automaton() -> &'static AhoCorasick {
     PAYLOAD_AC.get_or_init(|| {
         AhoCorasick::builder()
+            .kind(Some(AhoCorasickKind::DFA))
             .match_kind(MatchKind::LeftmostFirst)
             .build(PATTERNS.iter().map(|(p, _)| p))
             .expect("binary_hunter: AhoCorasick build cannot fail on static patterns")
@@ -255,5 +342,199 @@ mod tests {
         bytes.extend_from_slice(b"\x7fELF\x02\x01\x01\x00");
         let findings = scan(&bytes);
         assert_eq!(findings.len(), 2, "two threats must produce two findings");
+    }
+
+    #[test]
+    fn test_eval_base64_decode_detected() {
+        let bytes = b"var payload = eval(base64_decode(enc));";
+        let findings = scan(bytes);
+        assert!(!findings.is_empty(), "eval(base64_decode( must be detected");
+        assert!(
+            findings[0].description.contains("base64_decode"),
+            "description must reference base64_decode"
+        );
+    }
+
+    #[test]
+    fn test_exec_zlib_decompress_detected() {
+        let bytes = b"exec(zlib.decompress(data))";
+        let findings = scan(bytes);
+        assert!(
+            !findings.is_empty(),
+            "exec(zlib.decompress( must be detected"
+        );
+        assert!(
+            findings[0].description.contains("zlib.decompress"),
+            "description must reference zlib.decompress"
+        );
+    }
+
+    // ── Credential header tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_aws_iam_key_prefix_detected() {
+        // AKIAIOSFODNN7EXAMPLE is the canonical AWS documentation example key.
+        let bytes = b"const AWS_KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";";
+        let findings = scan(bytes);
+        assert!(!findings.is_empty(), "AKIA prefix must be detected");
+        assert!(
+            findings[0].description.contains("credential_leak"),
+            "description must cite credential_leak"
+        );
+        assert!(findings[0].description.contains("AWS"));
+    }
+
+    #[test]
+    fn test_rsa_private_key_pem_header_detected() {
+        let bytes = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...";
+        let findings = scan(bytes);
+        assert!(!findings.is_empty(), "RSA PEM header must be detected");
+        assert!(
+            findings[0].description.contains("RSA private key"),
+            "description must cite RSA private key"
+        );
+    }
+
+    #[test]
+    fn test_stripe_live_key_prefix_detected() {
+        // Assembled at runtime so the literal `sk_live_` prefix does not
+        // appear in source and cannot be flagged by static push-protection
+        // scanners.  Our detector triggers on the AhoCorasick prefix alone.
+        let mut bytes = b"STRIPE_KEY=sk_".to_vec();
+        bytes.extend_from_slice(b"live_FakeTestOnlyNotARealKey");
+        let findings = scan(&bytes);
+        assert!(
+            !findings.is_empty(),
+            "Stripe live key prefix must be detected"
+        );
+        assert!(
+            findings[0].description.contains("Stripe"),
+            "description must cite Stripe"
+        );
+    }
+
+    #[test]
+    fn test_stripe_test_key_not_flagged() {
+        // Assembled at runtime — `sk_test_` prefix does not appear as a
+        // literal so static push-protection scanners cannot flag it.
+        // Test-mode keys are not production credentials — must NOT fire.
+        let mut bytes = b"stripe_key = sk_".to_vec();
+        bytes.extend_from_slice(b"test_abcdefghijklmnopqrstuvwx");
+        let findings = scan(&bytes);
+        assert!(
+            findings.is_empty(),
+            "Stripe test-mode key must not be flagged"
+        );
+    }
+
+    // ── Supply-chain integrity tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_external_https_script_tag_detected() {
+        // https:// external script without SRI — pattern fires on "http" prefix.
+        let bytes = b"<script src=\"https://cdn.example.com/lib.js\"></script>";
+        let findings = scan(bytes);
+        assert!(
+            !findings.is_empty(),
+            "<script src=\"https://…\" must be detected as unpinned_asset"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("unpinned_asset")),
+            "description must cite unpinned_asset"
+        );
+    }
+
+    #[test]
+    fn test_relative_script_path_not_flagged() {
+        // Relative paths have no supply-chain risk — must not fire.
+        let bytes = b"<script src=\"/assets/app.js\" defer></script>";
+        let findings = scan(bytes);
+        assert!(
+            findings.is_empty(),
+            "relative script path must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_github_io_url_detected() {
+        // .github.io/ URL in production source — supply-chain risk.
+        let bytes = b"const CDN = \"https://myorg.github.io/dist/lib.js\";";
+        let findings = scan(bytes);
+        assert!(
+            !findings.is_empty(),
+            ".github.io/ URL must be detected as unpinned_asset"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("unpinned_asset")),
+            "must have unpinned_asset finding"
+        );
+    }
+
+    #[test]
+    fn test_github_com_url_not_flagged() {
+        // github.com (not .github.io) is not flagged — different risk profile.
+        let bytes = b"const REPO = \"https://github.com/org/repo\";";
+        let findings = scan(bytes);
+        assert!(findings.is_empty(), "github.com URL must not be flagged");
+    }
+
+    #[test]
+    fn test_xz_eval_echo_detected() {
+        // CVE-2024-3094 build-script pattern: eval $(echo ...) obfuscated command.
+        let bytes = b"eval $(echo aGVsbG8gd29ybGQ=)";
+        let findings = scan(bytes);
+        assert!(
+            !findings.is_empty(),
+            "eval $(echo ...) must be detected as obfuscated_build_script"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("obfuscated_build_script")),
+            "must have obfuscated_build_script finding"
+        );
+    }
+
+    #[test]
+    fn test_xz_base64_pipe_bash_detected() {
+        // CVE-2024-3094 build-script pattern: base64 decode piped directly to bash.
+        let bytes = b"cat payload.b64 | base64 -d | bash";
+        let findings = scan(bytes);
+        assert!(
+            !findings.is_empty(),
+            "| base64 -d | bash must be detected as obfuscated_build_script"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("obfuscated_build_script")),
+            "must have obfuscated_build_script finding"
+        );
+    }
+
+    #[test]
+    fn test_base64_encode_not_flagged() {
+        // base64 encoding (not decoding to bash) is legitimate — e.g. CI artifact upload.
+        let bytes = b"echo 'hello world' | base64 -e > encoded.txt";
+        let findings = scan(bytes);
+        assert!(
+            findings.is_empty(),
+            "base64 encode to file must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_legitimate_base64_decode_to_file_not_flagged() {
+        // base64 -d writing to a file (not piped to bash) is legitimate.
+        let bytes = b"base64 -d encoded.txt > decoded_output.bin";
+        let findings = scan(bytes);
+        assert!(
+            findings.is_empty(),
+            "base64 decode to file must not be flagged"
+        );
     }
 }

@@ -1,7 +1,18 @@
+pub mod bloom;
 pub mod deps;
+pub mod immunity;
+pub mod license;
 pub mod physarum;
 pub mod policy;
+pub mod pqc;
+pub mod receipt;
 pub mod registry;
+pub mod scan_state;
+pub mod scm;
+pub mod slop;
+pub mod surface;
+pub mod taint;
+pub mod wasm_receipt;
 pub mod wisdom;
 
 use rkyv::bytecheck::CheckBytes;

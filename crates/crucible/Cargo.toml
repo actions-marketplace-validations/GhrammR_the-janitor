@@ -1,0 +1,19 @@
+[package]
+name = "crucible"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Threat Gallery regression harness — deterministic intercept validation for every active detector"
+publish = false
+
+[[bin]]
+name = "crucible"
+path = "src/main.rs"
+
+[dependencies]
+forge = { path = "../forge" }
+common = { path = "../common" }
+
+[dev-dependencies]
+tempfile = "3"
+rkyv.workspace = true

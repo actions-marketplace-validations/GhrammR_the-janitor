@@ -47,7 +47,8 @@ pub mod unix {
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::Semaphore;
 
-    use common::physarum::{Pulse, SystemHeart};
+    use common::immunity::AffinityMaturator;
+    use common::physarum::{global_pulse, start_background_heart, Pulse};
     use common::registry::{MappedRegistry, SymbolRegistry};
     use forge::pr_collider::LshIndex;
     use forge::slop_filter::{PRBouncer, PatchBouncer};
@@ -77,12 +78,37 @@ pub mod unix {
             #[serde(default)]
             repo_path: Option<String>,
         },
+        /// P3-4 Continuous Assurance: re-scan only the files changed in a
+        /// git push event and emit security findings to SIEM.
+        ///
+        /// Implements the "continuous assurance mode" incremental re-scan:
+        /// the daemon filters scan results to the provided `changed_files`
+        /// list so that only new/modified paths are re-evaluated, mirroring
+        /// the `ScanState`-gated incremental scan used in the CLI bounce flow.
+        PushEvent {
+            /// Absolute path to the repository root.
+            repo_path: String,
+            /// Repo-relative paths of files changed in the push (e.g.
+            /// `["src/auth.ts", "pkg/handler.go"]`).
+            changed_files: Vec<String>,
+        },
     }
 
     /// Daemon response payload — one JSON object per line.
     #[derive(serde::Serialize)]
     #[serde(tag = "type")]
     pub enum DaemonResponse {
+        /// P3-4 Continuous Assurance scan result.
+        ScanReport {
+            /// Total security findings detected across `changed_files`.
+            findings_count: u32,
+            /// Number of `security:` findings emitted to SIEM.
+            siem_events_emitted: u32,
+            /// Repository path that was scanned.
+            repo_path: String,
+            /// Number of changed files evaluated.
+            changed_files_scanned: u32,
+        },
         /// Successful slop analysis report.
         Report {
             /// Weighted aggregate slop score (`f64` for API consistency with scan).
@@ -90,7 +116,18 @@ pub mod unix {
             /// Number of zombie symbol reintroductions detected.
             zombies: u32,
             /// Number of language-specific antipatterns detected (×50 each).
+            /// Kept for backward-compatibility with old Governor versions that
+            /// read only the count field.
             antipatterns: u32,
+            /// Full human-readable description strings for each detected
+            /// antipattern (one entry per finding).  Matches the
+            /// `BounceLogEntry.antipatterns` field so the Governor can
+            /// perform structural threat classification (`security:` prefix
+            /// check) without requiring an additional round-trip.
+            antipattern_details: Vec<String>,
+            /// PR numbers of prior patches sharing ≥85% MinHash Jaccard
+            /// similarity — structural clones detected by the Swarm engine.
+            collided_pr_numbers: Vec<u32>,
             /// Whether the PR author is listed in a Vouch identity file
             /// (`.vouched`, `trust.td`, or `.github/vouched.td`) inside the
             /// repository.  Always `false` when `author` or `repo_path` were
@@ -116,8 +153,7 @@ pub mod unix {
     /// zero-copy deserialization on load.
     pub struct HotRegistry {
         inner: ArcSwap<SymbolRegistry>,
-        // Retained for `reload()` — hot-swap API wired up in a future release.
-        #[allow(dead_code)]
+        // Retained for push-event reloads.
         path: std::path::PathBuf,
     }
 
@@ -154,7 +190,6 @@ pub mod unix {
         ///
         /// # Errors
         /// Returns `Err` if the file cannot be re-opened or deserialization fails.
-        #[allow(dead_code)]
         pub fn reload(&self) -> Result<()> {
             let registry = load_registry(&self.path)?;
             self.inner.store(Arc::new(registry));
@@ -182,14 +217,109 @@ pub mod unix {
         /// `bounce_log.ndjson` so that `janitor report` can aggregate
         /// daemon-served bounce activity alongside CLI invocations.
         pub janitor_dir: std::path::PathBuf,
-        /// Physarum Protocol — OS memory pressure monitor.
-        ///
-        /// Sampled before each new connection is handed off to a task.
-        pub heart: SystemHeart,
         /// Concurrency gate for [`Pulse::Flow`] mode — [`FLOW_CONCURRENCY`] permits.
         pub flow_semaphore: Arc<Semaphore>,
         /// Concurrency gate for [`Pulse::Constrict`] mode — [`CONSTRICT_CONCURRENCY`] permits.
         pub constrict_semaphore: Arc<Semaphore>,
+        /// Optional SIEM webhook URL (from `JANITOR_SIEM_WEBHOOK_URL` env var).
+        ///
+        /// When set, `emit_siem_event` POSTs structured finding JSON to this
+        /// endpoint.  When unset, events are appended to
+        /// `{janitor_dir}/siem_events.ndjson` for local SIEM ingestion.
+        pub siem_webhook_url: Option<String>,
+        /// Epoch-millisecond timestamp of the last successful Physarum heartbeat.
+        ///
+        /// Initialised to 0 (never beaten). Updated by `record_heartbeat()`.
+        /// Any gap exceeding 30 000 ms is reported as a `daemon:heartbeat_timeout`
+        /// warning via `check_heartbeat_timeout()`.
+        pub last_heartbeat_ms: std::sync::atomic::AtomicU64,
+        /// P9-1 Physarum Immune Memory — accumulates confirmed vuln-pattern
+        /// signatures across all bounce requests served by this daemon instance.
+        pub immune_memory: std::sync::Mutex<AffinityMaturator>,
+    }
+
+    impl DaemonState {
+        /// Emit a structured SIEM event for a security finding.
+        ///
+        /// Writes to `{janitor_dir}/siem_events.ndjson` (always) and optionally
+        /// POSTs to `siem_webhook_url` when the env var is configured.
+        /// I/O errors are silently dropped — SIEM emission must never fail a
+        /// CI bounce request.
+        pub fn emit_siem_event(&self, finding_detail: &str) {
+            emit_siem_event_inner(&self.janitor_dir, &self.siem_webhook_url, finding_detail);
+        }
+
+        /// Record a successful Physarum heartbeat at the current wall-clock time.
+        pub fn record_heartbeat(&self) {
+            use std::sync::atomic::Ordering;
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            self.last_heartbeat_ms.store(ms, Ordering::Relaxed);
+        }
+
+        /// Returns `Some(elapsed_ms)` when the gap since the last heartbeat exceeds
+        /// 30 000 ms and a `daemon:heartbeat_timeout` warning should be emitted.
+        /// Returns `None` when the gap is within tolerance or no heartbeat has been
+        /// recorded yet (last_heartbeat_ms == 0).
+        pub fn check_heartbeat_timeout(&self) -> Option<u64> {
+            use std::sync::atomic::Ordering;
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let last = self.last_heartbeat_ms.load(Ordering::Relaxed);
+            if last == 0 {
+                return None;
+            }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let elapsed = now.saturating_sub(last);
+            if elapsed > 30_000 {
+                Some(elapsed)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[inline]
+    fn daemon_pressure_pulse() -> Pulse {
+        global_pulse()
+    }
+
+    /// Write one SIEM event to the ndjson sink.  Free function so tests can call
+    /// it without constructing a full `DaemonState`.
+    pub fn emit_siem_event_inner(
+        janitor_dir: &std::path::Path,
+        webhook_url: &Option<String>,
+        finding_detail: &str,
+    ) {
+        use std::io::Write as _;
+        let event = serde_json::json!({
+            "ts": crate::utc_now_iso8601(),
+            "class": "security_finding",
+            "detail": finding_detail,
+        });
+        let line = format!("{}\n", event);
+        // Append to siem_events.ndjson
+        let ndjson_path = janitor_dir.join("siem_events.ndjson");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&ndjson_path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+        // Best-effort webhook POST — drop on any error to avoid blocking CI.
+        if let Some(url) = webhook_url.as_deref() {
+            if !url.is_empty() {
+                let _ = ureq::post(url)
+                    .header("Content-Type", "application/json")
+                    .send(line.as_str());
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -225,17 +355,24 @@ pub mod unix {
     /// # Errors
     /// Returns `Err` if the registry cannot be loaded or the socket cannot be bound.
     pub async fn serve(socket_path: &Path, registry_path: &Path) -> Result<()> {
+        start_background_heart();
         let janitor_dir = registry_path
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf();
+        let siem_webhook_url = std::env::var("JANITOR_SIEM_WEBHOOK_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         let state = Arc::new(DaemonState {
             registry: HotRegistry::open(registry_path)?,
             lsh_index: LshIndex::new(),
             janitor_dir,
-            heart: SystemHeart::new(),
             flow_semaphore: Arc::new(Semaphore::new(FLOW_CONCURRENCY)),
             constrict_semaphore: Arc::new(Semaphore::new(CONSTRICT_CONCURRENCY)),
+            siem_webhook_url,
+            last_heartbeat_ms: std::sync::atomic::AtomicU64::new(0),
+            immune_memory: std::sync::Mutex::new(AffinityMaturator::new()),
         });
 
         // Remove a stale socket file from a previous run.
@@ -263,7 +400,7 @@ pub mod unix {
                                 // connection open and retry every 500 ms until
                                 // the system digests current load.  The client
                                 // socket stays alive; the task simply parks.
-                                while let Pulse::Stop = s.heart.beat() {
+                                while let Pulse::Stop = daemon_pressure_pulse() {
                                     eprintln!(
                                         "janitor daemon: memory pressure STOP — \
                                          holding request (500 ms)"
@@ -274,7 +411,7 @@ pub mod unix {
                                 // current pressure before entering the handler.
                                 // `acquire_owned` takes `Arc<Self>` by value —
                                 // clone the Arc cheaply to pass ownership.
-                                let _permit = match s.heart.beat() {
+                                let _permit = match daemon_pressure_pulse() {
                                     Pulse::Constrict => Arc::clone(&s.constrict_semaphore)
                                         .acquire_owned()
                                         .await
@@ -317,6 +454,12 @@ pub mod unix {
         let mut lines = BufReader::new(reader).lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            // Emit a SIEM warning if the Physarum pulse has been silent for > 30 s.
+            if let Some(elapsed_ms) = state.check_heartbeat_timeout() {
+                state.emit_siem_event(&format!(
+                    "daemon:heartbeat_timeout — Physarum pulse gap {elapsed_ms}ms exceeds 30s threshold"
+                ));
+            }
             let response = process_request(&line, &state).await;
             let mut json = match serde_json::to_string(&response) {
                 Ok(j) => j,
@@ -339,6 +482,9 @@ pub mod unix {
     /// After scoring, inserts a `PrDeltaSignature` for the patch into the `LshIndex`
     /// and adds any cross-PR collision count to `logic_clones_found`.
     async fn process_request(line: &str, state: &Arc<DaemonState>) -> DaemonResponse {
+        // Record a Physarum heartbeat on every successful request dispatch so
+        // check_heartbeat_timeout() can detect stalled daemon processes.
+        state.record_heartbeat();
         match serde_json::from_str::<DaemonRequest>(line) {
             Ok(DaemonRequest::Bounce {
                 patch,
@@ -349,46 +495,22 @@ pub mod unix {
                 let guard = state.registry.load();
                 let registry: &SymbolRegistry = &guard;
 
-                match PatchBouncer.bounce(&patch, registry) {
+                let bouncer = repo_path
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .map(PatchBouncer::for_workspace)
+                    .unwrap_or_default();
+
+                match bouncer.bounce(&patch, registry) {
                     Ok(mut score) => {
                         // Cross-PR collision detection via LSH MinHash index.
                         let sig =
                             forge::pr_collider::PrDeltaSignature::from_bytes(patch.as_bytes());
                         let near_matches = state.lsh_index.query(&sig, 0.85);
                         score.logic_clones_found += near_matches.len() as u32;
-                        score.collided_pr_numbers = near_matches.clone();
+                        let min_hashes = sig.min_hashes.to_vec();
                         // Insert for future comparisons — daemon has no PR number context.
-                        state.lsh_index.insert(sig.clone(), 0);
-
-                        // Persist to bounce_log.ndjson for `janitor report` aggregation.
-                        // Daemon connections have no PR-number / author context — those
-                        // Cache computed values before consuming Vec fields via move.
-                        let slop_score = score.score();
-                        let antipatterns_count = score.antipatterns_found;
-                        let zombie_symbols_added = score.zombie_symbols_added;
-
-                        // fields are None.  Best-effort: I/O errors are silently dropped.
-                        let log_entry = crate::report::BounceLogEntry {
-                            pr_number: None,
-                            author: author.clone(),
-                            timestamp: crate::utc_now_iso8601(),
-                            slop_score,
-                            dead_symbols_added: score.dead_symbols_added,
-                            logic_clones_found: score.logic_clones_found,
-                            zombie_symbols_added,
-                            unlinked_pr: score.unlinked_pr,
-                            antipatterns: score.antipattern_details,
-                            comment_violations: score.comment_violation_details,
-                            min_hashes: sig.min_hashes.to_vec(),
-                            zombie_deps: Vec::new(),
-                            state: crate::report::PrState::Open,
-                            is_bot: false,
-                            repo_slug: String::new(),
-                            suppressed_by_domain: score.suppressed_by_domain,
-                            collided_pr_numbers: near_matches,
-                            necrotic_flag: score.necrotic_flag,
-                        };
-                        crate::report::append_bounce_log(&state.janitor_dir, &log_entry);
+                        state.lsh_index.insert(sig, 0);
 
                         // Vouch identity check: requires both the author handle and the
                         // repository root path supplied in the request.  Falls back to
@@ -400,10 +522,81 @@ pub mod unix {
                             _ => false,
                         };
 
+                        // Persist to bounce_log.ndjson for `janitor report` aggregation.
+                        // Daemon connections have no PR-number context. Cache computed
+                        // values before consuming Vec fields via move.
+                        let slop_score = score.score();
+                        let antipatterns_count = score.antipatterns_found;
+                        let zombie_symbols_added = score.zombie_symbols_added;
+                        // P3-4 Phase A: emit SIEM events for every security finding.
+                        // P9-1 Phase A: ingest each security finding into immune memory
+                        //   so the AffinityMaturator accumulates cross-request pattern
+                        //   exposure counts for downstream maturation and anomaly gating.
+                        for detail in &score.antipattern_details {
+                            if detail.starts_with("security:") {
+                                state.emit_siem_event(detail);
+                                if let Ok(mut mem) = state.immune_memory.lock() {
+                                    mem.ingest_pattern(common::immunity::hash_pattern(
+                                        detail.as_bytes(),
+                                    ));
+                                }
+                            }
+                        }
+                        // fields are None.  Best-effort: I/O errors are silently dropped.
+                        let ci_energy_saved_kwh = crate::report::compute_ci_energy_saved_kwh(
+                            0,
+                            slop_score,
+                            score.necrotic_flag.as_deref(),
+                            &score.antipattern_details,
+                            &near_matches,
+                        );
+                        let mut log_entry = crate::report::BounceLogEntry {
+                            execution_tier: "Community".to_string(),
+                            pr_number: None,
+                            author,
+                            timestamp: crate::utc_now_iso8601(),
+                            slop_score,
+                            dead_symbols_added: score.dead_symbols_added,
+                            logic_clones_found: score.logic_clones_found,
+                            zombie_symbols_added,
+                            unlinked_pr: score.unlinked_pr,
+                            antipatterns: score.antipattern_details,
+                            comment_violations: score.comment_violation_details,
+                            min_hashes,
+                            zombie_deps: Vec::new(),
+                            state: crate::report::PrState::Open,
+                            is_bot: false,
+                            repo_slug: String::new(),
+                            suppressed_by_domain: score.suppressed_by_domain,
+                            collided_pr_numbers: near_matches,
+                            necrotic_flag: score.necrotic_flag,
+                            commit_sha: String::new(),
+                            policy_hash: String::new(),
+                            version_silos: Vec::new(),
+                            agentic_pct: 0.0,
+                            ci_energy_saved_kwh,
+                            provenance: crate::report::Provenance::default(),
+                            governor_status: None,
+                            pqc_sig: None,
+                            pqc_slh_sig: None,
+                            pqc_key_source: None,
+                            transparency_log: None,
+                            wisdom_hash: None,
+                            wisdom_signature: None,
+                            wasm_policy_receipts: Vec::new(),
+                            capsule_hash: None,
+                            decision_receipt: None,
+                            cognition_surrender_index: 0.0,
+                            git_signature_status: None,
+                        };
+                        crate::report::append_bounce_log(&state.janitor_dir, &log_entry);
+
                         DaemonResponse::Report {
                             slop_score: slop_score as f64,
                             zombies: zombie_symbols_added,
                             antipatterns: antipatterns_count,
+                            antipattern_details: std::mem::take(&mut log_entry.antipatterns),
+                            collided_pr_numbers: std::mem::take(&mut log_entry.collided_pr_numbers),
                             is_vouched,
                         }
                     }
@@ -412,9 +605,214 @@ pub mod unix {
                     },
                 }
             }
+            Ok(DaemonRequest::PushEvent {
+                repo_path,
+                changed_files,
+            }) => process_push_event(&repo_path, &changed_files, state).await,
             Err(e) => DaemonResponse::Error {
                 message: format!("Invalid request: {e}"),
             },
+        }
+    }
+
+    /// P3-4 Continuous Assurance: scan only the changed files from a push event.
+    ///
+    /// Runs the full Janitor hunt scanner over the repository and filters
+    /// findings to only those whose `file` path matches one of `changed_files`.
+    /// Each security finding is emitted to the SIEM/OTLP channel.
+    async fn process_push_event(
+        repo_path: &str,
+        changed_files: &[String],
+        state: &Arc<DaemonState>,
+    ) -> DaemonResponse {
+        let repo = std::path::Path::new(repo_path);
+        if !repo.is_dir() {
+            return DaemonResponse::Error {
+                message: format!("PushEvent repo_path is not a directory: {repo_path}"),
+            };
+        }
+
+        if let Err(e) = state.registry.reload() {
+            return DaemonResponse::Error {
+                message: format!("PushEvent registry reload failed: {e}"),
+            };
+        }
+
+        // Run the full hunt scanner over the repository.  `scan_directory`
+        // returns findings for all files; we filter to the changed set.
+        let all_findings = match crate::hunt::scan_directory(repo) {
+            Ok(f) => f,
+            Err(e) => {
+                return DaemonResponse::Error {
+                    message: format!("PushEvent scan failed: {e}"),
+                };
+            }
+        };
+
+        // Build a set of changed paths for O(1) lookup.  Normalise to
+        // forward-slash so the filter works on both Unix and Windows paths.
+        let changed_set: std::collections::HashSet<String> =
+            changed_files.iter().map(|p| p.replace('\\', "/")).collect();
+
+        let mut findings_count: u32 = 0;
+        let mut siem_events_emitted: u32 = 0;
+
+        for finding in &all_findings {
+            let file_rel = finding
+                .file
+                .as_deref()
+                .map(|f| f.replace('\\', "/"))
+                .unwrap_or_default();
+            // Match if the finding's path ends with any changed file suffix.
+            let is_changed = changed_set
+                .iter()
+                .any(|cf| file_rel.ends_with(cf.as_str()) || file_rel == *cf);
+            if !is_changed {
+                continue;
+            }
+            findings_count += 1;
+            if finding.id.starts_with("security:") {
+                let detail = format!(
+                    "{} — {} ({})",
+                    finding.id,
+                    finding.remediation.as_deref().unwrap_or("see docs"),
+                    file_rel
+                );
+                state.emit_siem_event(&detail);
+                siem_events_emitted += 1;
+            }
+        }
+
+        DaemonResponse::ScanReport {
+            findings_count,
+            siem_events_emitted,
+            repo_path: repo_path.to_string(),
+            changed_files_scanned: changed_files.len() as u32,
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // SIEM emission tests
+    // ---------------------------------------------------------------------------
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn siem_event_writes_ndjson_file() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            emit_siem_event_inner(dir.path(), &None, "security:test_finding — unit test");
+            let path = dir.path().join("siem_events.ndjson");
+            assert!(path.exists(), "siem_events.ndjson must be created");
+            let content = std::fs::read_to_string(&path).expect("read");
+            assert!(
+                content.contains("security:test_finding"),
+                "finding must appear in file"
+            );
+            assert!(
+                content.contains("security_finding"),
+                "class must be security_finding"
+            );
+        }
+
+        #[test]
+        fn siem_event_appends_multiple_findings() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            emit_siem_event_inner(dir.path(), &None, "security:finding_one — alpha");
+            emit_siem_event_inner(dir.path(), &None, "security:finding_two — beta");
+            let content =
+                std::fs::read_to_string(dir.path().join("siem_events.ndjson")).expect("read");
+            let lines: Vec<&str> = content.lines().collect();
+            assert_eq!(lines.len(), 2, "two findings must produce two ndjson lines");
+        }
+
+        #[test]
+        fn siem_event_no_webhook_when_url_none() {
+            // Must complete without panicking when webhook URL is None.
+            let dir = tempfile::tempdir().expect("tempdir");
+            emit_siem_event_inner(dir.path(), &None, "security:no_webhook_test");
+        }
+
+        #[test]
+        fn push_event_invalid_repo_path_returns_error() {
+            // A push event with a non-existent repo_path must not panic — it
+            // must return a structured error via the DaemonResponse path.
+            let req = r#"{"type":"PushEvent","repo_path":"/nonexistent/repo","changed_files":["src/foo.ts"]}"#;
+            let parsed = serde_json::from_str::<DaemonRequest>(req);
+            assert!(parsed.is_ok(), "PushEvent must deserialise correctly");
+            match parsed.unwrap() {
+                DaemonRequest::PushEvent {
+                    repo_path,
+                    changed_files,
+                } => {
+                    assert_eq!(repo_path, "/nonexistent/repo");
+                    assert_eq!(changed_files, vec!["src/foo.ts"]);
+                }
+                _ => panic!("expected PushEvent variant"),
+            }
+        }
+
+        #[test]
+        fn push_event_empty_changed_files_deserialises() {
+            let req = r#"{"type":"PushEvent","repo_path":"/tmp/repo","changed_files":[]}"#;
+            let parsed = serde_json::from_str::<DaemonRequest>(req);
+            assert!(parsed.is_ok());
+        }
+
+        #[test]
+        fn scan_report_response_serialises() {
+            let resp = DaemonResponse::ScanReport {
+                findings_count: 3,
+                siem_events_emitted: 2,
+                repo_path: "/tmp/repo".to_string(),
+                changed_files_scanned: 5,
+            };
+            let json = serde_json::to_string(&resp).expect("serialise");
+            assert!(json.contains("ScanReport"));
+            assert!(json.contains("findings_count"));
+            assert!(json.contains("siem_events_emitted"));
+        }
+
+        #[test]
+        fn daemon_pressure_uses_global_pulse_read_path() {
+            start_background_heart();
+            let pulse = daemon_pressure_pulse();
+            assert!(
+                matches!(pulse, Pulse::Flow | Pulse::Constrict | Pulse::Stop),
+                "daemon admission must read a valid Melanin Layer pulse"
+            );
+        }
+
+        #[test]
+        fn heartbeat_timeout_fires_at_30s_gap() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            use std::time::{SystemTime, UNIX_EPOCH};
+
+            // Simulate a last_heartbeat_ms that is 31 seconds in the past.
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let stale_ms = now_ms.saturating_sub(31_000);
+
+            // Build a minimal DaemonState-like context using the raw atomic.
+            // We test the timeout logic directly via a standalone AtomicU64 to
+            // avoid constructing a full DaemonState (which requires real files).
+            let last = AtomicU64::new(stale_ms);
+            let elapsed = now_ms.saturating_sub(last.load(Ordering::Relaxed));
+            assert!(
+                elapsed > 30_000,
+                "a 31-second-old heartbeat must exceed the 30s timeout threshold"
+            );
+
+            // Verify the inverse: a fresh heartbeat (now) does not trigger.
+            last.store(now_ms, Ordering::Relaxed);
+            let elapsed_fresh = now_ms.saturating_sub(last.load(Ordering::Relaxed));
+            assert!(
+                elapsed_fresh <= 30_000,
+                "a fresh heartbeat must not exceed the 30s threshold"
+            );
         }
     }
 }

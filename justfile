@@ -34,6 +34,8 @@ init:
 audit:
 	#!/usr/bin/env bash
 	set -euo pipefail
+	echo "↳ Batch-mode hint: run 'just shell' first to enter the pinned Nix environment once."
+	echo "↳ This avoids repeated flake re-evaluation latency on every 'just audit' invocation."
 	if [[ -z "${IN_NIX_SHELL:-}" ]] && command -v nix &>/dev/null; then
 	    echo "↳ Entering Nix hermetic shell for reproducible audit..."
 	    exec nix develop --command just audit
@@ -42,8 +44,35 @@ audit:
 	cargo fmt --all -- --check
 	cargo clippy --workspace -- -D warnings
 	cargo check --workspace
-	cargo test --workspace
-	echo "✅ System Clean."
+	cargo test --workspace -j2 -- --test-threads=4
+	bash ./tools/tests/test_release_parity.sh
+	./tools/verify_doc_parity.sh
+	just toolchain-preflight
+	just verify-harnesses
+	# Persist audit fingerprint so fast-release can skip redundant re-audit.
+	mkdir -p .janitor
+	find crates/ -type f | sort | xargs sha256sum 2>/dev/null | sha256sum | awk '{print $1}' > .janitor/.audit_hash
+	echo "✅ System Clean. Audit fingerprint saved."
+
+# Formal toolchain preflight — fail fast on missing proof/lint tools.
+toolchain-preflight:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	./tools/toolchain-preflight.sh
+
+# P4-11: Formal verification gate — runs Kani proof harnesses.
+verify-harnesses:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if ! cargo kani --version &>/dev/null 2>&1; then
+	    echo "Kani not installed. Remediation: cargo install --locked kani-verifier && cargo kani setup" >&2
+	    exit 1
+	fi
+	echo "→ Running Kani formal verification harnesses..."
+	(cd crates/forge && cargo kani --harness severity_points_no_panic_and_bounded)
+	(cd crates/forge && cargo kani --harness otlp_time_nanosecond_conversion_no_overflow)
+	(cd crates/forge && cargo kani --harness kev_critical_points_is_150)
+	echo "✅ Kani harnesses verified — panic-freedom and overflow-absence proved."
 
 build:
 	#!/usr/bin/env bash
@@ -59,92 +88,301 @@ clean:
 	find . -name "*.rkyv" -not -path "./.git/*" -delete
 	@echo "💥 Target directory and rkyv artefacts vaporized."
 
+# Aggressively reclaim WSL/host disk space without destroying the release cache.
+# Wipes debug incremental artifacts (the dominant VHDX growth driver).
+# Preserves target/release so the release binary stays intact.
+prune:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	echo "→ Pruning debug/incremental build artifacts..."
+	cargo clean --profile dev 2>/dev/null || cargo clean --doc 2>/dev/null || true
+	# Remove incremental compilation cache (largest VHDX contributor).
+	rm -rf target/debug/incremental target/debug/.fingerprint target/debug/deps
+	echo "→ Removing leftover rkyv snapshot artifacts..."
+	find . -name "*.rkyv" -not -path "./.git/*" -delete 2>/dev/null || true
+	# Nix garbage collection (no-op if nix is not installed).
+	if command -v nix-collect-garbage &>/dev/null; then
+	    echo "→ Running nix-collect-garbage -d..."
+	    nix-collect-garbage -d
+	else
+	    echo "↷ nix-collect-garbage not found — skipping Nix GC."
+	fi
+	echo "✅ Prune complete. Run 'df -h' to verify reclaimed space."
+
+# Verify bit-for-bit binary reproducibility (SLSA Level 4).
+#
+# Builds the release binary twice inside isolated Docker containers using an
+# identical rust:1.92.0-alpine image with lld and compares the SHA-384 digests.
+# Both digests must match for the build to be considered reproducible.
+#
+# Requirements: Docker must be running and rust:1.92.0-alpine must be pullable.
+verify-reproducible:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	REPRO_DIR="$(mktemp -d)"
+	mkdir -p "${REPRO_DIR}/build1" "${REPRO_DIR}/build2"
+	echo "→ Reproducible build pass 1..."
+	docker run --rm \
+	    -v "$(pwd):/src:ro" \
+	    -v "${REPRO_DIR}/build1:/out" \
+	    -w /src \
+	    rust:1.92.0-alpine \
+	    sh -c "apk add --no-cache lld musl-dev >/dev/null 2>&1 && CARGO_TARGET_DIR=/out cargo build --release -p janitor-cli 2>/dev/null"
+	echo "→ Reproducible build pass 2..."
+	docker run --rm \
+	    -v "$(pwd):/src:ro" \
+	    -v "${REPRO_DIR}/build2:/out" \
+	    -w /src \
+	    rust:1.92.0-alpine \
+	    sh -c "apk add --no-cache lld musl-dev >/dev/null 2>&1 && CARGO_TARGET_DIR=/out cargo build --release -p janitor-cli 2>/dev/null"
+	echo "→ Comparing binaries..."
+	sha384sum "${REPRO_DIR}/build1/release/janitor" "${REPRO_DIR}/build2/release/janitor"
+	if cmp -s "${REPRO_DIR}/build1/release/janitor" "${REPRO_DIR}/build2/release/janitor"; then
+	    echo "✅ Reproducible build VERIFIED — binaries are bit-for-bit identical."
+	else
+	    echo "✗ REPRODUCIBILITY FAILURE — binaries differ."
+	    rm -rf "${REPRO_DIR}"
+	    exit 1
+	fi
+	rm -rf "${REPRO_DIR}"
+
 # 3. AUTHENTICATION
 auth-refresh:
 	@echo "Auth is stateless — token injected at runtime via --token flag."
 
 # 4. RELEASE PROTOCOL
-bump-version version:
-	@echo "📈 Bumping version to {{version}}..."
-	# Rust manifests — workspace root + all crates + tools
-	sed -i 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
-	find crates tools -name "Cargo.toml" -exec sed -i 's/^version = ".*"/version = "{{version}}"/' {} +
-	# Markdown docs — v-prefixed version strings (README.md, docs/index.md)
-	sed -i 's/v[0-9]\+\.[0-9]\+\.[0-9]\+\(-[a-zA-Z0-9]\+\)\?/v{{version}}/g' README.md
-	sed -i 's/v[0-9]\+\.[0-9]\+\.[0-9]\+\(-[a-zA-Z0-9]\+\)\?/v{{version}}/g' docs/index.md
-	# ARCHITECTURE.md — two VERSION patterns: header (**VERSION:** x) and footer (**VERSION: x**)
-	sed -i 's/\*\*VERSION:\*\* [0-9]\+\.[0-9]\+\.[0-9]\+\(-[a-zA-Z0-9]\+\)\?/\*\*VERSION:\*\* {{version}}/' ARCHITECTURE.md
-	sed -i 's/\*\*VERSION: [0-9]\+\.[0-9]\+\.[0-9]\+\(-[a-zA-Z0-9]\+\)\?\*\*/\*\*VERSION: {{version}}\*\*/' ARCHITECTURE.md
-	# CLAUDE.md — local working doc (gitignored); update if present
-	sed -i 's/\*\*Current Version\*\*: `[0-9]\+\.[0-9]\+\.[0-9]\+`/\*\*Current Version\*\*: `{{version}}`/' CLAUDE.md 2>/dev/null || true
-	cargo check > /dev/null 2>&1 || true
-	@echo "✅ Manifests updated."
+#
+# Prerequisites: set [workspace.package].version in root Cargo.toml, then run:
+#   just release <X.Y.Z>   (bare version — recipe prepends 'v' for tags)
+#
+# Pipeline: fast-release (pre-flight → sync → audit → build/tag/push/release/deploy)
+#
+release version:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	echo "🚀 Initiating Release Sequence v{{version}}..."
+	exec just fast-release "{{version}}"
 
-release version: audit (bump-version version)
-	@echo "🚀 Initiating Release Sequence v{{version}}..."
-	cargo build --release --workspace
+# 4b. VERSION SYNC — reads [workspace.package].version from Cargo.toml and updates
+#     the headline version string in README.md and docs/index.md.
+#     Called automatically by fast-release.
+#
+sync-versions:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+	echo "→ Syncing docs to v${VERSION}"
+	VERSION="${VERSION}" perl -0pi -e 's/\*\*v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\s+—/**v$ENV{VERSION} —/g; s/The Janitor v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/The Janitor v$ENV{VERSION}/g; s#(shields\.io/(?:badge|static/v1)[^)]*?)v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?#$1v$ENV{VERSION}#g' README.md docs/index.md
+	echo "✅ Version sync complete: v${VERSION}"
+
+# 4c. FAST RELEASE — identical to `release` but skips the audit prerequisite.
+#
+# Use this when `just audit` has already been run explicitly in the same session.
+# The AI release sequence (`.claude/commands/release.md`) calls `just audit` once
+# as Step 3, then calls `just fast-release` as Step 4 to avoid a redundant re-audit.
+#
+fast-release version:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	echo "🚀 Initiating Fast Release Sequence v{{version}}..."
+	if [[ -n "${JANITOR_GPG_PASSPHRASE:-}" ]]; then
+	    PRESET_BIN="$(command -v gpg-preset-passphrase 2>/dev/null \
+	        || find /usr/lib/gnupg /usr/libexec/gnupg /opt/homebrew/libexec/gpg \
+	               -name gpg-preset-passphrase -print -quit 2>/dev/null || true)"
+	    if [[ -n "${PRESET_BIN}" ]]; then
+	        printf '%s' "${JANITOR_GPG_PASSPHRASE}" | "${PRESET_BIN}" --preset EA20B816F8A1750EB737C4E776AE1CBD050A171E
+	    fi
+	fi
+	if ! printf 'janitor-release-preflight' | gpg --batch --yes --pinentry-mode error --clearsign --local-user 4D68C2E93C07B38131E1CD2C7643B04E9C8FE26F >/dev/null 2>&1; then
+	    echo "error: GPG signing key is locked; run gpg-unlock or export JANITOR_GPG_PASSPHRASE before just fast-release {{version}}" >&2
+	    exit 1
+	fi
+	# Bump workspace version in Cargo.toml to the release target BEFORE sync-versions reads it.
+	sed -i "s/^version = \".*\"/version = \"{{version}}\"/" Cargo.toml
+	echo "→ Cargo.toml version set to {{version}}"
+	just sync-versions
+	# Idempotent audit gate: skip test suite if crates/ is unchanged since last audit.
+	CURRENT_HASH="$(find crates/ -type f | sort | xargs sha256sum 2>/dev/null | sha256sum | awk '{print $1}')"
+	SAVED_HASH="$(cat .janitor/.audit_hash 2>/dev/null || echo '')"
+	if [[ -n "${SAVED_HASH}" && "${CURRENT_HASH}" == "${SAVED_HASH}" ]]; then
+	    echo "Audit state unchanged — skipping redundant test suite."
+	else
+	    just audit
+	fi
+	cargo build --release -p cli
+	# Law II-D guard: fail fast if the binary was linked against Nix glibc.
+	# Nix-linked binaries cannot execute on GitHub Actions Ubuntu runners.
+	# Build in Docker instead: docker run --rm -v $(pwd):/workspace -v $HOME/.cargo/registry:/usr/local/cargo/registry -w /workspace rust:1.92-slim-bookworm bash -c "apt-get update -q && apt-get install -y -q libgit2-dev libssl-dev pkg-config && cargo build -p cli --release"
+	if readelf -l target/release/janitor 2>/dev/null | grep -q 'nix/store'; then
+	    echo "FATAL: Release binary is linked against Nix glibc. Use Docker build as described in .agent_governance/rules/release-discipline.md Law II-D." >&2
+	    exit 1
+	fi
+	mkdir -p .janitor
+	CARGO_LOCK_HASH_PATH=".janitor/cargo_lock.hash"
+	CURRENT_CARGO_LOCK_HASH="$(sha256sum Cargo.lock | awk '{print $1}')"
+	SBOM_SOURCE="crates/cli/janitor.cdx.json"
+	SBOM_PATH="target/release/janitor.cdx.json"
+	if [[ -f "${CARGO_LOCK_HASH_PATH}" ]] \
+	   && [[ "$(cat "${CARGO_LOCK_HASH_PATH}")" == "${CURRENT_CARGO_LOCK_HASH}" ]] \
+	   && [[ -f "${SBOM_PATH}" ]]; then
+	    echo "SBOM cache hit — Cargo.lock unchanged and ${SBOM_PATH} already present."
+	else
+	    cargo cyclonedx --manifest-path crates/cli/Cargo.toml --all --format json --spec-version 1.5 --override-filename janitor.cdx
+	    cp "${SBOM_SOURCE}" "${SBOM_PATH}"
+	    printf '%s\n' "${CURRENT_CARGO_LOCK_HASH}" > "${CARGO_LOCK_HASH_PATH}"
+	    echo "SBOM regenerated — Cargo.lock hash updated."
+	fi
 	strip target/release/janitor
-	git add .
-	git commit -m "chore: release v{{version}}"
-	git tag v{{version}}
-	# Floating major-version tag (@v6) — lets users pin to a major and
-	# always receive the latest stable patch without editing their workflows.
-	MAJOR="$(echo "{{version}}" | cut -d. -f1)" && git tag -fa "v${MAJOR}" -m "v${MAJOR} → v{{version}}"
-	git push origin HEAD:main "v{{version}}"
-	git push origin "v$(echo "{{version}}" | cut -d. -f1)" --force
-	"/mnt/c/Program Files/GitHub CLI/gh.exe" release create v{{version}} target/release/janitor \
-		--title "v{{version}} - The Industrial Pivot" \
-		--notes-file README.md \
-		--latest
-	uv run --with "mkdocs-material<9.6" --with "mkdocs<2" mkdocs gh-deploy --force
-	@echo "💀 Release v{{version}} deployed."
+	# SLSA Level 4: compute SHA-384 digest (and optional ML-DSA-65 sig) for binary provenance.
+	# Produces target/release/janitor.sha384 always; target/release/janitor.sig if JANITOR_PQC_KEY is set.
+	SIGN_ARGS=(target/release/janitor)
+	if [[ -n "${JANITOR_PQC_KEY:-}" ]]; then
+	    SIGN_ARGS+=(--pqc-key "${JANITOR_PQC_KEY}")
+	fi
+	./target/release/janitor sign-asset "${SIGN_ARGS[@]}"
+	SBOM_SIGN_ARGS=("${SBOM_PATH}")
+	if [[ -n "${JANITOR_PQC_KEY:-}" ]]; then
+	    SBOM_SIGN_ARGS+=(--pqc-key "${JANITOR_PQC_KEY}")
+	fi
+	./target/release/janitor sign-asset "${SBOM_SIGN_ARGS[@]}"
+	# Idempotency guard — check local and remote before any mutation (Law: idempotency.md).
+	if git rev-parse "v{{version}}" >/dev/null 2>&1 \
+	   || git ls-remote --tags origin "refs/tags/v{{version}}" | grep -q .; then
+	    echo "Idempotency guard: Release v{{version}} already exists. Halting gracefully."
+	    exit 0
+	fi
+	git add crates/ tools/ docs/ .agent_governance/ Cargo.toml Cargo.lock README.md mkdocs.yml justfile action.yml
+	git commit -S -m "chore: release v{{version}}" || { echo "FATAL: Commit failed."; exit 1; }
+	git tag -s v{{version}} -m "release v{{version}}" || { echo "FATAL: Tag failed."; exit 1; }
+	MAJOR="$(echo "{{version}}" | cut -d. -f1)"
+	git tag -fa "v${MAJOR}" -m "v${MAJOR} → v{{version}}"
+	git checkout -B "release/v{{version}}"
+	git push origin "release/v{{version}}" "v{{version}}"
+	git push origin "v${MAJOR}" --force
+	RELEASE_PR_URL="$(gh pr create \
+	    --base main \
+	    --head "release/v{{version}}" \
+	    --title "Release v{{version}}" \
+	    --body "Automated release PR for v{{version}}. Merge after \`secretless-gate-smoke\` passes." \
+	    2>&1 || true)"
+	echo "Release PR: ${RELEASE_PR_URL}"
+	if gh release view "v{{version}}" >/dev/null 2>&1; then
+	    echo "Idempotency guard: GitHub Release v{{version}} already exists. Skipping gh release create."
+	else
+	    RELEASE_ASSETS=(target/release/janitor target/release/janitor.sha384 "${SBOM_PATH}")
+	    [ -f target/release/janitor.sig ] && RELEASE_ASSETS+=(target/release/janitor.sig)
+	    [ -f "${SBOM_PATH}.sig" ] && RELEASE_ASSETS+=("${SBOM_PATH}.sig")
+	    gh release create v{{version}} \
+	        --generate-notes \
+	        --title "The Janitor v{{version}}" \
+	        "${RELEASE_ASSETS[@]}"
+	fi
+	just deploy-docs
+	echo "💀 Release v{{version}} deployed."
 
-# 5. MULTI-REPO GAUNTLET
-# Deterministic Rust orchestrator replacing ultimate_gauntlet.sh.
-# Reads gauntlet_targets.txt (one owner/repo per line), bounces PRs in parallel
-# within each repo (2-worker RAM gate), then generates a global PDF + CSV export.
+# 5. SINGLE-REPO FORENSIC STRIKE
+#
+# Runs the full 7-artefact forensic pipeline against one repository:
+#   PDF intelligence report + 16-col CSV audit trail + aggregate JSON
+#   + CycloneDX CBOM + per-repo intel JSON + VEX document + case-study.md
+#
+# Delegates entirely to tools/generate_client_package.sh which handles
+# the build, hyper-drive bounce, attestation, and synthesis steps.
+# Output lands in strikes/<repo_name>/ (workspace-isolated).
 #
 # Usage:
-#   just run-gauntlet                        # defaults from gauntlet_targets.txt
-#   just run-gauntlet --pr-limit 50          # 50 PRs per repo
-#   just run-gauntlet --pr-limit 5000 --timeout 60
-#   just run-gauntlet --targets my_repos.txt --out-dir ~/Desktop
+#   just strike godotengine/godot          # 1000 PRs (default)
+#   just strike kubernetes/kubernetes 5000 # custom PR limit
+#   just strike NixOS/nixpkgs 50
 #
-run-gauntlet *ARGS:
-	#!/usr/bin/env bash
-	set -euo pipefail
-	if [[ -z "${IN_NIX_SHELL:-}" ]] && command -v nix &>/dev/null; then
-	    echo "↳ Entering Nix hermetic shell..."
-	    exec nix develop --command just run-gauntlet {{ARGS}}
-	fi
-	cargo build --release -p gauntlet-runner
-	./target/release/gauntlet-runner {{ARGS}}
+strike repo pr_limit='1000':
+	PR_LIMIT={{pr_limit}} ./tools/generate_client_package.sh {{repo}}
 
-# Hyper-Gauntlet — libgit2 O(1) network-bypass global audit across all targets.
-#
-# Clones each repo once, populates refs/remotes/origin/pr/*, then
-# scores every PR directly from the packfile — zero `gh pr diff` subshells.
+# 6a. FUZZ CORPUS PROMOTION — minimize libFuzzer crash/timeout artifacts and
+#     install them as deterministic Crucible exhaustion fixtures.
 #
 # Usage:
-#   just hyper-gauntlet                     # 5000 PRs per repo (default)
-#   just hyper-gauntlet --pr-limit 500      # custom limit
-#   just hyper-gauntlet --targets my.txt    # custom targets file
+#   just promote-fuzz <ARTIFACT_DIR>
 #
-hyper-gauntlet *ARGS:
+promote-fuzz artifact_dir:
 	#!/usr/bin/env bash
 	set -euo pipefail
-	if [[ -z "${IN_NIX_SHELL:-}" ]] && command -v nix &>/dev/null; then
-	    echo "↳ Entering Nix hermetic shell..."
-	    exec nix develop --command just hyper-gauntlet {{ARGS}}
-	fi
-	cargo build --release -p gauntlet-runner -p cli
-	./target/release/gauntlet-runner --hyper --pr-limit 5000 {{ARGS}}
+	bash ./tools/promote_fuzz_corpus.sh "{{artifact_dir}}"
 
-# 6. DOCUMENTATION
+# 6b. PUBLISH FORENSIC STRIKE — execute strike + publish evidence + update intelligence index
+#
+# Wraps publish_forensic_strike.sh.  Runs generate_client_package.sh internally,
+# so there is no need to call `just strike` separately first.
+#
+# Usage:
+#   just publish-strike vercel/next.js
+#   just publish-strike godotengine/godot
+#   SKIP_STRIKE=1 just publish-strike godotengine/godot   # reuse existing artefacts
+#
+publish-strike repo:
+	./tools/publish_forensic_strike.sh {{repo}}
+
+# 6c. STRIKE PIPELINE TESTS — regression harness for generate_client_package.sh
+#     and publish_forensic_strike.sh
+#
+# Verifies: binary --version contract, script hygiene, argument contract,
+# artefact manifest integrity.  Requires a built release binary.
+#
+# Usage:
+#   just test-strike-pipeline
+#
+test-strike-pipeline:
+	./tools/tests/test_strike_pipeline.sh
+
+# 7. DOCUMENTATION
 deploy-docs:
-	uv run --with "mkdocs-material<9.6" --with "mkdocs<2" mkdocs gh-deploy --force
+	#!/usr/bin/env bash
+	set -euo pipefail
+	for attempt in 1 2 3; do
+	    if uv run --with "mkdocs-material<9.6" --with "mkdocs<2" mkdocs gh-deploy --force; then
+	        exit 0
+	    fi
+	    if [[ "${attempt}" -eq 3 ]]; then
+	        exit 1
+	    fi
+	    echo "warning: gh-pages deploy race detected; retrying in 2s (attempt ${attempt}/3 failed)" >&2
+	    sleep 2
+	done
 
-# 6. WINDOWS SYNC
+# 8. LOCAL BRANCH INTEGRITY CHECK
+#
+# Fast pre-merge verification of a local branch against main.
+# Runs the full bounce pipeline (git-native mode) without any network calls
+# or cloning — reads directly from the local packfile.
+#
+# Usage:
+#   just check-branch dependabot/cargo/serde-1.0.200
+#   just check-branch my-feature-branch 42          # with PR number for log entry
+#
+check-branch branch pr='0':
+	#!/usr/bin/env bash
+	set -euo pipefail
+	REPO_SLUG="$(git config --get remote.origin.url | sed -e 's/.*github.com[:/]//' -e 's/\.git$//')"
+	[[ -n "${REPO_SLUG}" ]] || { echo "error: could not resolve repo slug from git remote" >&2; exit 1; }
+	BASE_SHA="$(git rev-parse main)"
+	# Resolve branch to a commit SHA.  Resolution order:
+	#   1. Local branch ref (already checked out)
+	#   2. Remote-tracking ref (already fetched)
+	#   3. Locally cached PR ref from a prior fetch
+	#   4. Fetch via GitHub pull-request ref (works even when branch names
+	#      differ from the remote due to encoding, e.g. hyphens vs underscores
+	#      in Dependabot branch names)
+	PR_NUM="{{pr}}"
+	HEAD_SHA="$(git rev-parse --verify "{{branch}}" 2>/dev/null \
+	    || git rev-parse --verify "refs/remotes/origin/{{branch}}" 2>/dev/null \
+	    || { [[ "${PR_NUM}" != "0" ]] && git rev-parse --verify "refs/remotes/origin/pr/${PR_NUM}" 2>/dev/null; } \
+	    || { [[ "${PR_NUM}" != "0" ]] && git fetch --quiet origin "+refs/pull/${PR_NUM}/head:refs/remotes/origin/pr/${PR_NUM}" 2>/dev/null && git rev-parse "refs/remotes/origin/pr/${PR_NUM}"; } \
+	    || true)"
+	[[ -n "${HEAD_SHA}" ]] || { echo "error: could not resolve SHA for branch '{{branch}}' (pr={{pr}})" >&2; exit 1; }
+	./target/release/janitor bounce . --repo . --base "${BASE_SHA}" --head "${HEAD_SHA}" \
+	    --pr-number {{pr}} --repo-slug "${REPO_SLUG}" --format json
+
+# 9. WINDOWS SYNC
 sync:
 	@echo "🪟 Syncing to Windows mount..."
 	rsync -av --delete \

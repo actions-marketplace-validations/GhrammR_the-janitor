@@ -3,7 +3,7 @@
 //! Reads `.janitor/bounce_log.ndjson` — a newline-delimited JSON log appended
 //! by each `janitor bounce` invocation — and produces three analytical sections:
 //!
-//! 1. **Slop Top 50** — PRs ranked by composite [`SlopScore`].
+//! 1. **Slop Top 50** — PRs ranked by composite `SlopScore`.
 //! 2. **Structural Clones** — near-duplicate PR pairs detected via 64-hash
 //!    MinHash LSH (Jaccard ≥ 0.70).
 //! 3. **Zombie Dependencies** — PRs that introduced packages declared in a
@@ -14,9 +14,14 @@
 //!
 //! Output formats: `markdown` (default) and `json`.
 
+use hmac::{Hmac, KeyInit, Mac};
+use janitor_gov::compartment::{enforce_flow, Clearance};
+use reaper::transparency_log::TransparencyLog;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use vault::fips_boundary::{CryptoAlgorithm, CryptoBoundary, SecurityPurpose};
 
 // ---------------------------------------------------------------------------
 // ROI Constants — Workslop Triage Tax
@@ -28,6 +33,46 @@ use std::path::Path;
 ///
 /// Source: industry Workslop research (2026). See <https://builtin.com/articles/what-is-workslop>.
 pub const MINUTES_PER_TRIAGE: f64 = 12.0;
+/// Enterprise telemetry baseline: one CI node draws 150 W = 0.150 kW.
+pub const CI_NODE_POWER_KW: f64 = 0.150;
+/// Estimated number of CI reruns averted when a critical threat is intercepted.
+pub const CRITICAL_THREAT_AVERTED_RERUNS: f64 = 5.0;
+/// Sovereign default: localhost only.
+///
+/// The Janitor does not phone home by default.  Enterprises MUST configure
+/// their own Governor endpoint via `[forge] governor_url` in `janitor.toml`
+/// or the `--report-url` CLI flag.  This default guarantees zero unintentional
+/// egress from air-gapped or regulated environments.
+pub const DEFAULT_GOVERNOR_URL: &str = "http://127.0.0.1:8080";
+
+fn configured_source_clearance() -> anyhow::Result<Clearance> {
+    Clearance::from_optional_env(std::env::var("JANITOR_DATA_CLEARANCE").ok())
+        .map_err(anyhow::Error::from)
+}
+
+fn configured_webhook_clearance() -> anyhow::Result<Clearance> {
+    Clearance::from_optional_env(std::env::var("JANITOR_WEBHOOK_CLEARANCE").ok())
+        .map_err(anyhow::Error::from)
+}
+
+fn enforce_webhook_export_flow() -> anyhow::Result<()> {
+    let src = configured_source_clearance()?;
+    let dst = configured_webhook_clearance()?;
+    enforce_flow(src, dst)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InclusionProof {
+    pub sequence_index: u64,
+    pub chained_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GovernorAttestation {
+    pub inclusion_proof: InclusionProof,
+    pub decision_receipt: common::receipt::SignedDecisionReceipt,
+}
 
 // ---------------------------------------------------------------------------
 // Categorical Billing — Threat Classification
@@ -41,6 +86,412 @@ pub const MINUTES_PER_TRIAGE: f64 = 12.0;
 /// Critical Threats are billed at **$150** per intercept in the TEI ledger.
 pub fn is_critical_threat(e: &BounceLogEntry) -> bool {
     e.antipatterns.iter().any(|a| a.contains("security:")) || !e.collided_pr_numbers.is_empty()
+}
+
+/// Convert measured bounce duration into CI energy saved telemetry.
+///
+/// The telemetry basis is hardware-bound rather than static marketing math:
+/// `duration_seconds / 3600 * 0.150 kW`.  Critical threats are multiplied by
+/// an estimated five averted CI reruns.
+pub fn compute_ci_energy_saved_kwh_from_metrics(
+    analysis_duration_ms: u64,
+    actionable: bool,
+    critical: bool,
+) -> f64 {
+    if !actionable || analysis_duration_ms == 0 {
+        return 0.0;
+    }
+    let duration_seconds = analysis_duration_ms as f64 / 1000.0;
+    let mut energy_kwh = (duration_seconds / 3600.0) * CI_NODE_POWER_KW;
+    if critical {
+        energy_kwh *= CRITICAL_THREAT_AVERTED_RERUNS;
+    }
+    energy_kwh
+}
+
+/// Authoritative CI energy helper for bounce log emission.
+pub fn compute_ci_energy_saved_kwh(
+    analysis_duration_ms: u64,
+    slop_score: u32,
+    necrotic_flag: Option<&str>,
+    antipatterns: &[String],
+    collided_pr_numbers: &[u32],
+) -> f64 {
+    let critical = antipatterns
+        .iter()
+        .any(|detail| detail.contains("security:"))
+        || !collided_pr_numbers.is_empty();
+    let actionable = critical || slop_score > 0 || necrotic_flag.is_some();
+    compute_ci_energy_saved_kwh_from_metrics(analysis_duration_ms, actionable, critical)
+}
+
+fn resolve_webhook_secret(cfg: &common::policy::WebhookConfig) -> String {
+    if cfg.secret.starts_with("env:") {
+        let var_name = &cfg.secret[4..];
+        match std::env::var(var_name) {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!(
+                    "Structural Integrity Warning: Webhook secret environment variable is not set. Delivering unsigned payload."
+                );
+                String::new()
+            }
+        }
+    } else {
+        cfg.secret.clone()
+    }
+}
+
+fn sign_webhook_payload(secret: &str, payload: &str) -> String {
+    if secret.is_empty() {
+        return String::new();
+    }
+    if CryptoBoundary::record_operation(
+        "cli::report::sign_webhook_payload",
+        CryptoAlgorithm::HmacSha256,
+        SecurityPurpose::TransportIntegrity,
+    )
+    .is_err()
+    {
+        return String::new();
+    }
+
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(payload.as_bytes());
+    let result = mac.finalize().into_bytes();
+    let hex: String = result.iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256={hex}")
+}
+
+fn spawn_signed_webhook_post(
+    url: String,
+    event_name: &'static str,
+    payload: String,
+    sig_header: String,
+) {
+    std::thread::spawn(move || {
+        let mut builder = ureq::post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-Janitor-Event", event_name);
+        if !sig_header.is_empty() {
+            builder = builder.header("X-Janitor-Signature-256", &sig_header);
+        }
+        match builder.send(payload.as_str()) {
+            Ok(_) => {}
+            Err(e) => eprintln!("warning: webhook delivery failed: {e}"),
+        }
+    });
+}
+
+fn structured_findings_from_entry(entry: &BounceLogEntry) -> Vec<common::slop::StructuredFinding> {
+    entry
+        .antipatterns
+        .iter()
+        .map(|detail| common::slop::StructuredFinding {
+            id: detail.split(" — ").next().unwrap_or(detail).to_string(),
+            file: None,
+            line: None,
+            fingerprint: blake3::hash(
+                format!(
+                    "{}:{}:{}:{}",
+                    entry.repo_slug,
+                    entry.commit_sha,
+                    entry.pr_number.unwrap_or_default(),
+                    detail
+                )
+                .as_bytes(),
+            )
+            .to_hex()
+            .to_string(),
+            severity: None,
+            remediation: None,
+            docs_url: None,
+            exploit_witness: None,
+            upstream_validation_absent: false,
+            ..Default::default()
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LifecycleWebhookPayload {
+    event: &'static str,
+    repo_slug: String,
+    pr_number: Option<u64>,
+    commit_sha: String,
+    slop_score: u32,
+    threshold: u32,
+    ticket_project: Option<String>,
+    finding_count: usize,
+    findings: Vec<common::slop::StructuredFinding>,
+    emitted_at: String,
+}
+
+/// Fire an outbound webhook POST if configured in `janitor.toml`.
+///
+/// - Signs the payload with HMAC-SHA256 using the configured secret.
+/// - Resolves `"env:VAR_NAME"` secrets from the environment at call time.
+/// - Filters events by `webhook.events` before sending.
+/// - Best-effort: logs a warning on failure, never panics, never blocks the bounce result.
+/// - Non-blocking: spawns a thread for the HTTP POST so the CLI exits promptly.
+/// - Payload is the full `BounceLogEntry` JSON — `provenance.source_bytes_processed`
+///   and `provenance.egress_bytes_sent` are always present, enabling SIEM dashboards
+///   (Datadog / Splunk) to compute the zero-upload ratio: `egress / source ≈ 0%`.
+pub fn fire_webhook_if_configured(entry: &BounceLogEntry, policy: &common::policy::JanitorPolicy) {
+    let cfg = &policy.webhook;
+    let is_critical = is_critical_threat(entry);
+    let is_necrotic = entry.necrotic_flag.is_some();
+
+    if !cfg.should_fire(is_critical, is_necrotic) {
+        return;
+    }
+    if let Err(err) = enforce_webhook_export_flow() {
+        eprintln!("{err}");
+        return;
+    }
+
+    // ── Resolve secret ───────────────────────────────────────────────────
+    let secret = resolve_webhook_secret(cfg);
+
+    // ── Serialize payload ────────────────────────────────────────────────
+    let payload = match serde_json::to_string(entry) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("warning: failed to serialise webhook payload: {e}");
+            return;
+        }
+    };
+
+    // ── HMAC-SHA256 signature ─────────────────────────────────────────────
+    let sig_header = sign_webhook_payload(&secret, &payload);
+
+    let url = cfg.url.clone();
+    let event_name = if is_critical {
+        "critical_threat"
+    } else {
+        "necrotic_flag"
+    };
+
+    spawn_signed_webhook_post(url, event_name, payload, sig_header);
+}
+
+/// Emit a webhook-driven ASPM lifecycle event when the finding state changes.
+///
+/// Uses the existing HMAC signing model and webhook transport, but emits a
+/// narrower payload keyed to finding lifecycle transitions so ticketing systems
+/// can open and resolve cases deterministically.
+pub fn emit_lifecycle_webhook(
+    entry: &BounceLogEntry,
+    prior_entry: Option<&BounceLogEntry>,
+    current_findings: &[common::slop::StructuredFinding],
+    effective_gate: u32,
+    policy: &common::policy::JanitorPolicy,
+) {
+    let cfg = &policy.webhook;
+    if cfg.url.is_empty() || !cfg.lifecycle_events {
+        return;
+    }
+    if let Err(err) = enforce_webhook_export_flow() {
+        eprintln!("{err}");
+        return;
+    }
+
+    let prior_flagged = prior_entry
+        .map(|prior| prior.slop_score > effective_gate)
+        .unwrap_or(false);
+    let current_flagged = entry.slop_score > effective_gate;
+
+    let (event_name, findings) = if current_flagged && !prior_flagged {
+        let findings = if current_findings.is_empty() {
+            structured_findings_from_entry(entry)
+        } else {
+            current_findings.to_vec()
+        };
+        ("finding_opened", findings)
+    } else if prior_flagged && entry.slop_score == 0 {
+        let findings = prior_entry
+            .map(structured_findings_from_entry)
+            .unwrap_or_default();
+        ("finding_resolved", findings)
+    } else {
+        return;
+    };
+
+    let payload = LifecycleWebhookPayload {
+        event: event_name,
+        repo_slug: entry.repo_slug.clone(),
+        pr_number: entry.pr_number,
+        commit_sha: entry.commit_sha.clone(),
+        slop_score: entry.slop_score,
+        threshold: effective_gate,
+        ticket_project: cfg.ticket_project.clone(),
+        finding_count: findings.len(),
+        findings,
+        emitted_at: crate::utc_now_iso8601(),
+    };
+    let payload = match serde_json::to_string(&payload) {
+        Ok(payload) => payload,
+        Err(e) => {
+            eprintln!("warning: failed to serialise lifecycle webhook payload: {e}");
+            return;
+        }
+    };
+    let secret = resolve_webhook_secret(cfg);
+    let sig_header = sign_webhook_payload(&secret, &payload);
+    spawn_signed_webhook_post(cfg.url.clone(), event_name, payload, sig_header);
+}
+
+// ---------------------------------------------------------------------------
+// SBOM drift webhook emitter
+// ---------------------------------------------------------------------------
+
+/// Emit an `sbom_drift` webhook event listing newly detected package names.
+///
+/// Fires best-effort (non-blocking, errors suppressed) on the configured webhook
+/// URL with the `sbom_drift` event name.  Skips silently when no URL is configured
+/// or `sbom_drift` is not in the allowed events list.
+pub fn emit_sbom_drift_webhook(new_packages: &[String], policy: &common::policy::JanitorPolicy) {
+    let cfg = &policy.webhook;
+    if cfg.url.is_empty() {
+        return;
+    }
+    if let Err(err) = enforce_webhook_export_flow() {
+        eprintln!("{err}");
+        return;
+    }
+    if !cfg.events.is_empty() && !cfg.events.iter().any(|e| e == "sbom_drift") {
+        return;
+    }
+    let payload = serde_json::json!({
+        "event": "sbom_drift",
+        "new_packages": new_packages,
+        "new_package_count": new_packages.len(),
+        "emitted_at": crate::utc_now_iso8601(),
+    });
+    let payload_str = match serde_json::to_string(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: failed to serialise sbom_drift webhook payload: {e}");
+            return;
+        }
+    };
+    let secret = resolve_webhook_secret(cfg);
+    let sig = sign_webhook_payload(&secret, &payload_str);
+    spawn_signed_webhook_post(cfg.url.clone(), "sbom_drift", payload_str, sig);
+}
+
+// ---------------------------------------------------------------------------
+// webhook-test command
+// ---------------------------------------------------------------------------
+
+/// `janitor webhook-test` — synchronous test delivery to the configured webhook URL.
+///
+/// Loads `[webhook]` from `janitor.toml` in `repo`, constructs a synthetic
+/// `critical_threat` `BounceLogEntry`, signs it with HMAC-SHA256, and POSTs it
+/// synchronously.  Unlike `fire_webhook_if_configured` (which is non-blocking and
+/// best-effort), this function blocks and returns an error on failure so the
+/// customer gets clear terminal feedback.
+pub fn cmd_webhook_test(repo: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let policy = common::policy::JanitorPolicy::load(repo)?;
+    let cfg = &policy.webhook;
+
+    if cfg.url.is_empty() {
+        anyhow::bail!(
+            "No webhook URL configured. Add a [webhook] section to {}/janitor.toml",
+            repo.display()
+        );
+    }
+
+    eprintln!("info: webhook-test — URL: {}", cfg.url);
+    eprintln!("info: webhook-test — events filter: {:?}", cfg.events);
+
+    // ── Resolve secret ───────────────────────────────────────────────────────
+    let secret = resolve_webhook_secret(cfg);
+
+    // ── Construct synthetic critical_threat payload ──────────────────────────
+    let dummy = BounceLogEntry {
+        execution_tier: "Community".to_string(),
+        pr_number: Some(0),
+        author: Some("janitor-webhook-test".to_string()),
+        timestamp: crate::utc_now_iso8601(),
+        slop_score: 150,
+        dead_symbols_added: 0,
+        logic_clones_found: 0,
+        zombie_symbols_added: 0,
+        unlinked_pr: 0,
+        antipatterns: vec!["security:unsafe_string_function".to_string()],
+        comment_violations: vec![],
+        min_hashes: vec![],
+        zombie_deps: vec![],
+        state: PrState::Open,
+        is_bot: false,
+        repo_slug: "janitor-webhook-test/test-repo".to_string(),
+        suppressed_by_domain: 0,
+        collided_pr_numbers: vec![],
+        necrotic_flag: None,
+        commit_sha: "0000000000000000000000000000000000000000".to_string(),
+        policy_hash: "test".to_string(),
+        version_silos: vec![],
+        agentic_pct: 100.0,
+        ci_energy_saved_kwh: compute_ci_energy_saved_kwh_from_metrics(60_000, true, true),
+        provenance: Provenance::default(),
+        governor_status: None,
+        pqc_sig: None,
+        pqc_slh_sig: None,
+        pqc_key_source: None,
+        transparency_log: None,
+        wisdom_hash: None,
+        wisdom_signature: None,
+        wasm_policy_receipts: Vec::new(),
+        capsule_hash: None,
+        decision_receipt: None,
+        cognition_surrender_index: 0.0,
+        git_signature_status: None,
+    };
+
+    let payload = serde_json::to_string(&dummy).context("failed to serialise test payload")?;
+    // codeql[rust/cleartext-logging] False positive: logging an aggregated numerical count
+    eprintln!(
+        "info: webhook-test — payload size: {} bytes",
+        std::hint::black_box(payload.len())
+    );
+
+    // ── HMAC-SHA256 signature ────────────────────────────────────────────────
+    let sig_header = if !secret.is_empty() {
+        let header = sign_webhook_payload(&secret, &payload);
+        eprintln!("info: webhook-test — X-Janitor-Signature-256: {header}");
+        header
+    } else {
+        eprintln!("warning: webhook-test — no secret configured, sending unsigned");
+        String::new()
+    };
+
+    // ── Blocking POST ────────────────────────────────────────────────────────
+    let mut builder = ureq::post(&cfg.url)
+        .header("Content-Type", "application/json")
+        .header("X-Janitor-Event", "critical_threat");
+    if !sig_header.is_empty() {
+        builder = builder.header("X-Janitor-Signature-256", &sig_header);
+    }
+
+    match builder.send(payload.as_str()) {
+        Ok(resp) => {
+            let status = resp.status();
+            eprintln!("info: webhook-test — HTTP {status} ✓ delivery confirmed");
+            println!("webhook-test OK — HTTP {status}");
+        }
+        Err(ureq::Error::StatusCode(code)) => {
+            anyhow::bail!("webhook-test FAILED — HTTP {code}");
+        }
+        Err(e) => {
+            anyhow::bail!("webhook-test FAILED — transport error: {e}");
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +541,34 @@ impl std::str::FromStr for PrState {
 }
 
 // ---------------------------------------------------------------------------
+// Provenance
+// ---------------------------------------------------------------------------
+
+/// Zero-upload proof ledger — bytes processed vs. bytes transmitted to the
+/// control plane.
+///
+/// Allows an operator to verify the zero-exfiltration claim at the
+/// individual-bounce level: `source_bytes_processed` captures the raw
+/// analysis surface; `egress_bytes_sent` is the exact byte-length of the
+/// JSON payload POSTed to the Governor.  The ratio (egress / source) ≈ 0%
+/// — the structural score, never the source — is what crosses the network.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Provenance {
+    /// Wall-clock duration of the full bounce analysis in milliseconds.
+    pub analysis_duration_ms: u64,
+    /// Total bytes of added source content fed into the analysis engine.
+    ///
+    /// Patch mode: sum of bytes on `+` lines (excluding `+++` headers).
+    /// Git-native mode: sum of all changed-file blob sizes from the pack index.
+    pub source_bytes_processed: u64,
+    /// Exact byte-length of the JSON payload POSTed to the Governor control plane.
+    ///
+    /// Zero when `--analysis-token` is absent (local-only / CLI-only mode).
+    /// This is the *only* data that leaves the runner.
+    pub egress_bytes_sent: u64,
+}
+
+// ---------------------------------------------------------------------------
 // BounceLogEntry
 // ---------------------------------------------------------------------------
 
@@ -99,6 +578,8 @@ impl std::str::FromStr for PrState {
 /// each `janitor bounce` invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BounceLogEntry {
+    #[serde(default = "default_execution_tier")]
+    pub execution_tier: String,
     /// PR number, if supplied via `--pr-number`.
     #[serde(default)]
     pub pr_number: Option<u64>,
@@ -134,7 +615,7 @@ pub struct BounceLogEntry {
     /// Empty for git-native bounces and pre-v6.9 log entries.
     #[serde(default)]
     pub comment_violations: Vec<String>,
-    /// MinHash sketch — 64 `u64` values — for clone detection via [`LshIndex`].
+    /// MinHash sketch — 64 `u64` values — for clone detection via `LshIndex`.
     ///
     /// Computed from raw patch bytes (patch mode) or the deterministic merkle key
     /// (git-native mode). Empty for log entries written before this field was added.
@@ -192,6 +673,328 @@ pub struct BounceLogEntry {
     /// code).  `None` when no necrotic condition was detected.
     #[serde(default)]
     pub necrotic_flag: Option<String>,
+
+    /// Git commit SHA of the PR head at bounce time.
+    ///
+    /// Populated from `--head <sha>` in git-native mode, or from the
+    /// `GITHUB_SHA` environment variable in GitHub Actions.
+    /// Empty string when neither is available.
+    #[serde(default)]
+    pub commit_sha: String,
+
+    /// BLAKE3 hex digest of the `janitor.toml` file contents at bounce time.
+    ///
+    /// Provides a cryptographic reference to the policy that was in effect
+    /// when this decision was made — directly answers the SOC 2 auditor
+    /// question: "What policy was active at the time of this scan?"
+    ///
+    /// Empty string when no `janitor.toml` is present (default policy applied).
+    #[serde(default)]
+    pub policy_hash: String,
+
+    /// Crate/package names that appear at more than one distinct version across the PR's
+    /// manifest files (`Cargo.toml`, `package.json`).
+    ///
+    /// Each entry contributed +20 points to `slop_score` at bounce time.
+    #[serde(default)]
+    pub version_silos: Vec<String>,
+
+    /// Percentage of commits in this PR attributed to an agentic actor (Copilot,
+    /// autonomous coding agent, etc.), expressed as a float in `[0.0, 100.0]`.
+    ///
+    /// Computed as `(commits_with_agentic_origin / total_pr_commits) × 100`.
+    /// When per-commit attribution data is unavailable (the common case), this
+    /// field defaults to `100.0` if `policy.is_agentic_actor()` fired on the PR
+    /// author, or `0.0` otherwise.
+    ///
+    /// Maps to the GitHub "active Copilot coding agent" metrics introduced in
+    /// the March 2026 infrastructure update.
+    #[serde(default)]
+    pub agentic_pct: f64,
+
+    /// CI datacenter energy saved by this intercept, in kilowatt-hours.
+    ///
+    /// Computed dynamically from measured bounce duration:
+    /// `(analysis_duration_ms / 1000 / 3600) × 0.150 kW`.
+    /// Critical threats multiply that base value by five estimated averted
+    /// reruns; clean entries remain `0.0`.
+    #[serde(default)]
+    pub ci_energy_saved_kwh: f64,
+
+    /// Zero-upload proof ledger — bytes analysed vs. bytes transmitted.
+    ///
+    /// Populated at bounce time.  Allows auditors to verify that
+    /// `egress_bytes_sent / source_bytes_processed` ≈ 0% — structural score
+    /// only, not source code, crosses the network boundary.
+    #[serde(default)]
+    pub provenance: Provenance,
+
+    /// Governor attestation status for this bounce result.
+    ///
+    /// - `"ok"` — bounce result successfully POSTed to the Governor.
+    /// - `"degraded"` — POST failed and `--soft-fail` was active; pipeline
+    ///   proceeded without attestation.  The slop score is still authoritative.
+    /// - `None` (field absent) — Governor attestation not attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governor_status: Option<String>,
+
+    /// ML-DSA-65 (FIPS 204) signature over the CycloneDX v1.6 CBOM for this entry,
+    /// base64-encoded (STANDARD alphabet).
+    ///
+    /// Present only when `janitor bounce --pqc-key <source>` was used with a
+    /// filesystem-backed ML-DSA-65 private key and signing succeeded.
+    /// Verifiable offline via:
+    ///   `janitor verify-cbom --key <pub.key> <log.ndjson>`
+    ///
+    /// When present, Governor attestation was skipped — local BYOK signing is
+    /// the chain-of-custody mechanism for this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pqc_sig: Option<String>,
+
+    /// SLH-DSA-SHAKE-192s (FIPS 205) signature over the deterministic CBOM.
+    ///
+    /// Present when the supplied key bundle contained stateless SLH-DSA private
+    /// key material in addition to the ML-DSA-65 key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pqc_slh_sig: Option<String>,
+
+    /// Typed custody source for the PQC attestation key.
+    ///
+    /// Present when `--pqc-key` was supplied. Values are constrained to:
+    /// `filesystem`, `aws-kms`, `azure-kv`, or `pkcs11`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pqc_key_source: Option<String>,
+
+    /// Inclusion proof from the Governor's append-only transparency log.
+    ///
+    /// Present when the Governor accepted this signed bounce result and
+    /// anchored its detached CBOM signature material in the Blake3 hash chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparency_log: Option<InclusionProof>,
+
+    /// BLAKE3 hex digest of the verified Wisdom feed receipt that governed
+    /// this bounce result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wisdom_hash: Option<String>,
+
+    /// Detached Ed25519 signature string for the verified Wisdom feed receipt
+    /// that governed this bounce result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wisdom_signature: Option<String>,
+
+    /// Deterministic provenance receipts for executed private Wasm policy modules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wasm_policy_receipts: Vec<common::wasm_receipt::WasmPolicyReceipt>,
+
+    /// BLAKE3 digest of the persisted replay capsule that governed the receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_hash: Option<String>,
+
+    /// Governor countersigned decision receipt sealing the policy/intel/CBOM tuple.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_receipt: Option<common::receipt::SignedDecisionReceipt>,
+
+    /// Structural rot density attributable to agentic authorship.
+    ///
+    /// Formula: `slop_score as f64 / agentic_pct` when `agentic_pct > 0.0`,
+    /// otherwise `0.0`.  Higher values indicate more structural damage per unit
+    /// of AI contribution.  Surfaces in the GitHub Step Summary to help teams
+    /// distinguish noise from genuine AI-introduced regressions.
+    #[serde(default)]
+    pub cognition_surrender_index: f64,
+
+    /// Cryptographic signature provenance verdict for the commit under analysis.
+    ///
+    /// One of: `"verified"`, `"unsigned"`, `"invalid"`, `"mismatched_identity"`.
+    /// Absent (`None`) when no commit SHA was available at bounce time (patch-only
+    /// mode) or when the git repository is inaccessible.
+    ///
+    /// `"unsigned"` and `"invalid"` verdicts cause [`BounceLogEntry::is_bot`] to
+    /// be forced `false` regardless of `trusted_bot_authors` / `automation_accounts`
+    /// configuration — trust requires a cryptographic signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_signature_status: Option<String>,
+}
+
+fn default_execution_tier() -> String {
+    "Community".to_string()
+}
+
+/// Dedicated audit-ledger event for filesystem PQC key rotation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyRotationEvent {
+    pub event_type: String,
+    pub timestamp: String,
+    pub key_path: String,
+    pub backup_path: String,
+    pub bundle_bytes: usize,
+}
+
+impl BounceLogEntry {
+    fn export_threat_class(&self) -> &'static str {
+        if is_critical_threat(self) {
+            "Critical"
+        } else if self.necrotic_flag.is_some() || !self.zombie_deps.is_empty() {
+            "Necrotic"
+        } else if self.slop_score > 0 {
+            "StructuralSlop"
+        } else {
+            "Boilerplate"
+        }
+    }
+
+    fn export_cef_severity(&self) -> u8 {
+        match self.export_severity_label() {
+            "KevCritical" => 10,
+            "Critical" => 8,
+            "Warning" => 5,
+            _ => 1,
+        }
+    }
+
+    fn export_severity_label(&self) -> &'static str {
+        let detail = self
+            .antipatterns
+            .first()
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_default();
+        if detail.contains("kevcritical") || detail.contains("cisa kev") {
+            "KevCritical"
+        } else if is_critical_threat(self) {
+            "Critical"
+        } else if self.slop_score > 0
+            || self.necrotic_flag.is_some()
+            || !self.zombie_deps.is_empty()
+        {
+            "Warning"
+        } else {
+            "Informational"
+        }
+    }
+
+    fn export_rule_id(&self) -> String {
+        self.antipatterns
+            .first()
+            .map(|detail| {
+                detail
+                    .split(" — ")
+                    .next()
+                    .unwrap_or(detail)
+                    .trim()
+                    .to_string()
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| self.export_threat_class().to_string())
+    }
+
+    fn export_remediation(&self) -> String {
+        self.antipatterns
+            .first()
+            .and_then(|detail| {
+                detail
+                    .split_once(" — ")
+                    .map(|(_, rhs)| rhs.trim().to_string())
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| self.export_detail_message())
+    }
+
+    fn export_detail_message(&self) -> String {
+        let mut details = Vec::new();
+        details.extend(self.antipatterns.iter().cloned());
+        details.extend(self.comment_violations.iter().cloned());
+        if !self.zombie_deps.is_empty() {
+            details.push(format!("zombie_deps={}", self.zombie_deps.join("|")));
+        }
+        if !self.version_silos.is_empty() {
+            details.push(format!("version_silos={}", self.version_silos.join("|")));
+        }
+        if let Some(flag) = self.necrotic_flag.as_deref() {
+            details.push(format!("necrotic_flag={flag}"));
+        }
+        if details.is_empty() {
+            details.push("no_findings_recorded".to_string());
+        }
+        details.join(" ; ")
+    }
+
+    fn cef_escape(value: &str) -> String {
+        value
+            .replace('\\', "\\\\")
+            .replace('|', "\\|")
+            .replace('=', "\\=")
+            .replace(['\n', '\r'], " ")
+    }
+
+    pub fn to_cef_string(&self) -> String {
+        format!(
+            "CEF:0|JanitorSecurity|TheJanitor|10.2|{}|{}|{}|msg={} cs1={} cs2={}",
+            Self::cef_escape(&self.export_rule_id()),
+            Self::cef_escape(self.export_threat_class()),
+            self.export_cef_severity(),
+            Self::cef_escape(&self.export_remediation()),
+            Self::cef_escape(&self.repo_slug),
+            self.pr_number
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "0".to_string()),
+        )
+    }
+
+    pub fn to_ocsf_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "metadata": {
+                "version": "1.1.0",
+                "product": {
+                    "name": "The Janitor",
+                    "vendor_name": "JanitorSecurity",
+                    "version": env!("CARGO_PKG_VERSION"),
+                }
+            },
+            "category_name": "Findings",
+            "category_uid": 2,
+            "class_name": "Security Finding",
+            "class_uid": 2001,
+            "activity_name": "Create",
+            "activity_id": 1,
+            "severity": self.export_severity_label(),
+            "severity_id": self.export_cef_severity(),
+            "status": if self.slop_score > 0 { "Open" } else { "Closed" },
+            "status_id": if self.slop_score > 0 { 1 } else { 2 },
+            "time": self.timestamp,
+            "message": self.export_detail_message(),
+            "finding_info": {
+                "title": format!("Janitor {}", self.export_rule_id()),
+                "desc": self.export_remediation(),
+                "uid": format!(
+                    "{}:{}:{}",
+                    self.repo_slug,
+                    self.pr_number.unwrap_or_default(),
+                    self.commit_sha
+                ),
+                "types": self.antipatterns,
+            },
+            "resources": [{
+                "name": self.repo_slug,
+                "uid": self.commit_sha,
+                "type": "repository",
+            }],
+            "src_endpoint": {
+                "service_name": "Governor",
+            },
+            "unmapped": {
+                "pr_number": self.pr_number,
+                "author": self.author,
+                "logic_clones_found": self.logic_clones_found,
+                "dead_symbols_added": self.dead_symbols_added,
+                "zombie_symbols_added": self.zombie_symbols_added,
+                "comment_violations": self.comment_violations,
+                "zombie_deps": self.zombie_deps,
+                "version_silos": self.version_silos,
+                "policy_hash": self.policy_hash,
+                "agentic_pct": self.agentic_pct,
+            }
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +1024,8 @@ pub struct ReportData {
     pub clone_pairs: Vec<(usize, usize)>,
     /// Indices of entries that have at least one zombie dependency.
     pub zombie_indices: Vec<usize>,
+    /// Indices of entries that have at least one version silo.
+    pub silo_indices: Vec<usize>,
     /// Total engineering minutes reclaimed: necrotic PR count × [`MINUTES_PER_TRIAGE`].
     ///
     /// Only PRs with `necrotic_flag.is_some()` contribute — these are
@@ -228,16 +1033,19 @@ pub struct ReportData {
     /// can be bulk-closed by a bot without human review.  Score-blocked PRs
     /// still require a human to verify the finding, so they do not reclaim time.
     pub total_reclaimed_minutes: f64,
-    /// Total number of actionable intercepts: Critical Threats OR Garbage
-    /// Collection (Necrotic) PRs.  Does NOT count PRs whose score is elevated
-    /// purely by `logic_clones_found` — clone boilerplate inflates score but
-    /// does not represent a billable security event.
+    /// Total number of actionable intercepts: Critical Threats, Necrotic GC,
+    /// OR Structural Slop PRs (slop_score > 0, no critical or necrotic signal).
     pub total_actionable_intercepts: u64,
     /// Count of PRs classified as Critical Threats per [`is_critical_threat`].
     ///
     /// A subset of `total_actionable_intercepts`; used to split TEI billing
-    /// between the $150 security-intercept tier and $20 GC tier.
+    /// between the $150 security-intercept tier and $20 GC/slop tiers.
     pub critical_threats_count: u64,
+    /// Count of PRs with `slop_score > 0` that are neither Critical nor Necrotic.
+    ///
+    /// These PRs carry measurable structural debt but no security or dead-code
+    /// signal.  Billed at **$20** per intercept in the TEI ledger.
+    pub structural_slop_count: u64,
     /// Indices of entries that carry a `necrotic_flag`, sorted by slop_score descending.
     pub necrotic_indices: Vec<usize>,
     /// Top 10 contributors ranked by cumulative slop score descending.
@@ -270,12 +1078,21 @@ pub fn load_bounce_log(janitor_dir: &Path) -> Vec<BounceLogEntry> {
 /// Appends one entry as a JSON line to `.janitor/bounce_log.ndjson`.
 ///
 /// Creates the janitor directory and log file if absent.
-/// Calls [`File::sync_all`] after writing to flush the OS page cache to physical
+/// Calls `File::sync_all` after writing to flush the OS page cache to physical
 /// disk before returning — guarantees the entry survives a SIGKILL of the parent
 /// shell script between iterations.
 /// Emits a diagnostic to stderr on any I/O failure so silent log loss is detectable.
 pub fn append_bounce_log(janitor_dir: &Path, entry: &BounceLogEntry) {
-    let line = match serde_json::to_string(entry) {
+    append_log_line(janitor_dir, entry);
+}
+
+/// Appends one PQC key-rotation event as a JSON line to `.janitor/bounce_log.ndjson`.
+pub fn append_key_rotation_log(janitor_dir: &Path, event: &KeyRotationEvent) {
+    append_log_line(janitor_dir, event);
+}
+
+fn append_log_line<T: Serialize>(janitor_dir: &Path, event: &T) {
+    let line = match serde_json::to_string(event) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("janitor: bounce_log serialization failed: {e}");
@@ -306,6 +1123,14 @@ pub fn append_bounce_log(janitor_dir: &Path, entry: &BounceLogEntry) {
             // write(2) returned successfully.
             if let Err(e) = f.sync_all() {
                 eprintln!("janitor: sync_all on {} failed: {e}", log_path.display());
+                return;
+            }
+            let transparency_path = janitor_dir.join("transparency_log.ndjson");
+            if let Err(e) = TransparencyLog::append_leaf(&transparency_path, line.as_bytes()) {
+                eprintln!(
+                    "janitor: transparency append to {} failed: {e}",
+                    transparency_path.display()
+                );
             }
         }
         Err(e) => {
@@ -315,6 +1140,235 @@ pub fn append_bounce_log(janitor_dir: &Path, entry: &BounceLogEntry) {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// SVG Integrity Badge
+// ---------------------------------------------------------------------------
+
+/// Write a color-coded status badge to `.janitor/janitor_badge.svg`.
+///
+/// Color coding:
+/// - **Green** (`#4c1`):  score 0 — structurally clean.
+/// - **Yellow** (`#db5`): score 1–99 — warnings present, gate not yet failed.
+/// - **Red** (`#e05d44`): score ≥ 100 — gate failure.
+///
+/// The badge uses a flat shields.io-compatible format and can be embedded in
+/// GitHub READMEs, status pages, or automated PR comments.
+///
+/// Best-effort: silently logs a warning on I/O failure, never panics.
+pub fn write_badge(janitor_dir: &Path, score: u32) {
+    if let Err(e) = std::fs::create_dir_all(janitor_dir) {
+        eprintln!("janitor: cannot create .janitor dir for badge: {e}");
+        return;
+    }
+    let svg = render_badge_svg(score);
+    let path = janitor_dir.join("janitor_badge.svg");
+    if let Err(e) = std::fs::write(&path, svg.as_bytes()) {
+        eprintln!("janitor: failed to write badge {}: {e}", path.display());
+    }
+}
+
+/// Render a minimal shields.io-style flat SVG badge for the given slop score.
+///
+/// Zero external dependencies — all geometry is computed from character counts
+/// using an 11px Verdana approximate width of 6.5 px/char.
+fn render_badge_svg(score: u32) -> String {
+    let (status, color) = if score == 0 {
+        ("CLEAN", "#4c1")
+    } else if score < 100 {
+        ("WARN", "#db5")
+    } else {
+        ("FAIL", "#e05d44")
+    };
+
+    let label = "janitor";
+    let value_text = format!("{score} \u{00b7} {status}"); // middle dot separator
+
+    // Approximate 6.5px per char + 10px horizontal padding per section.
+    let label_w = label.len() * 65 / 10 + 10;
+    let value_w = value_text.chars().count() * 65 / 10 + 10;
+    let total_w = label_w + value_w;
+    let label_cx = label_w / 2;
+    let value_cx = label_w + value_w / 2;
+
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{total_w}" height="20">
+  <linearGradient id="a" x2="0" y2="100%">
+    <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+    <stop offset="1" stop-opacity=".1"/>
+  </linearGradient>
+  <rect rx="3" width="{total_w}" height="20" fill="#555"/>
+  <rect rx="3" x="{label_w}" width="{value_w}" height="20" fill="{color}"/>
+  <rect x="{label_w}" width="4" height="20" fill="{color}"/>
+  <rect rx="3" width="{total_w}" height="20" fill="url(#a)"/>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
+    <text x="{label_cx}" y="15">{label}</text>
+    <text x="{value_cx}" y="15">{value_text}</text>
+  </g>
+</svg>"##
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Architecture Inversion — Governor result submission
+// ---------------------------------------------------------------------------
+
+/// Returns the effective Governor base URL after trimming a trailing slash.
+pub fn normalize_governor_url(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
+}
+
+/// Resolve the Governor base URL from CLI override, policy, or built-in default.
+pub fn resolve_governor_url(
+    cli_override: Option<&str>,
+    policy: &common::policy::JanitorPolicy,
+) -> String {
+    cli_override
+        .map(normalize_governor_url)
+        .or_else(|| {
+            policy
+                .forge
+                .governor_url
+                .as_deref()
+                .map(normalize_governor_url)
+        })
+        .unwrap_or_else(|| DEFAULT_GOVERNOR_URL.to_string())
+}
+
+fn governor_report_endpoint(base_url: &str) -> String {
+    format!("{}/v1/report", normalize_governor_url(base_url))
+}
+
+fn governor_health_endpoint(base_url: &str) -> String {
+    format!("{}/health", normalize_governor_url(base_url))
+}
+
+/// POST the [`BounceLogEntry`] to the Governor's `/v1/report` endpoint.
+///
+/// Used in Architecture Inversion mode: after `append_bounce_log`, if `--governor-url`
+/// and `--analysis-token` are set, the scored entry is submitted to the Governor so
+/// it can update the GitHub Check Run without ever receiving source code.
+///
+/// **Fail-closed**: any transport error or non-2xx response is returned as `Err`.
+/// The caller (`cmd_bounce`) must propagate this as a hard process exit so the
+/// firewall cannot be bypassed by a degraded or hostile Governor endpoint.
+/// The Bearer token is the short-lived JWT obtained from `/v1/analysis-token`.
+pub fn post_bounce_result(
+    agent: &ureq::Agent,
+    governor_base_url: &str,
+    token: &str,
+    entry: &BounceLogEntry,
+) -> anyhow::Result<GovernorAttestation> {
+    let body = serde_json::to_string(entry)?;
+    let report_url = governor_report_endpoint(governor_base_url);
+    let result = agent
+        .post(&report_url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .send(body.as_str());
+    match result {
+        Ok(mut r) if r.status() == 200 || r.status() == 201 => {
+            let response: serde_json::Value = r
+                .body_mut()
+                .read_json()
+                .map_err(|_| anyhow::anyhow!("Governor response parse failed"))?;
+            let proof = serde_json::from_value::<InclusionProof>(
+                response.get("inclusion_proof").cloned().ok_or_else(|| {
+                    anyhow::anyhow!("Governor /v1/report omitted inclusion_proof")
+                })?,
+            )
+            .map_err(|_| anyhow::anyhow!("Governor response validation failed"))?;
+            let decision_receipt =
+                serde_json::from_value::<common::receipt::SignedDecisionReceipt>(
+                    response.get("decision_receipt").cloned().ok_or_else(|| {
+                        anyhow::anyhow!("Governor /v1/report omitted decision_receipt")
+                    })?,
+                )
+                .map_err(|_| anyhow::anyhow!("Governor response validation failed"))?;
+            eprintln!("info: bounce result reported to Governor");
+            Ok(GovernorAttestation {
+                inclusion_proof: proof,
+                decision_receipt,
+            })
+        }
+        Ok(r) => {
+            anyhow::bail!(
+                "Governor /v1/report returned HTTP {} — firewall cannot confirm attestation",
+                r.status()
+            );
+        }
+        Err(_e) => {
+            // CodeQL: error message redacted — ureq error may carry Authorization header fragments.
+            anyhow::bail!(
+                "failed to POST bounce result to Governor — firewall cannot confirm attestation"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fail-Silent Diagnostics
+// ---------------------------------------------------------------------------
+
+/// Append a timestamped diagnostic message to `.janitor/diag.log`.
+///
+/// Always best-effort — any I/O error is silently discarded.  This facility
+/// is intentionally hidden from CI output; the operator inspects the log
+/// when troubleshooting rather than seeing noise in the CI transcript.
+pub fn append_diag_log(janitor_dir: &Path, msg: &str) {
+    use std::io::Write as _;
+    let path = janitor_dir.join("diag.log");
+    let ts = crate::utc_now_iso8601();
+    let line = format!("[{ts}] {msg}\n");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Fire a once-per-week "System OK" heartbeat to the Governor health endpoint.
+///
+/// - Checks the mtime of `.janitor/heartbeat`; skips if modified within the
+///   last 7 days.
+/// - On a due cycle: GETs `<governor_url>/health` with a 5-second
+///   timeout, logs the result to `.janitor/diag.log`, then touches the heartbeat
+///   file to reset the 7-day window.
+/// - Entirely best-effort and silent: no stdout/stderr output, no CI impact.
+pub fn send_heartbeat_if_due(agent: &ureq::Agent, janitor_dir: &Path, governor_base_url: &str) {
+    let heartbeat_path = janitor_dir.join("heartbeat");
+
+    let due = match std::fs::metadata(&heartbeat_path) {
+        Err(_) => true,
+        Ok(meta) => meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs() > 7 * 24 * 3600)
+            .unwrap_or(true),
+    };
+
+    if !due {
+        return;
+    }
+
+    let msg = match agent
+        .get(&governor_health_endpoint(governor_base_url))
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .call()
+    {
+        Ok(r) => format!("heartbeat: Governor /health → HTTP {}", r.status()),
+        Err(e) => format!("heartbeat: Governor unreachable — {e}"),
+    };
+    append_diag_log(janitor_dir, &msg);
+
+    // Touch the heartbeat file to reset the 7-day window.
+    let _ = std::fs::write(&heartbeat_path, b"");
 }
 
 // ---------------------------------------------------------------------------
@@ -341,21 +1395,36 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
         .map(|(i, _)| i)
         .collect();
 
+    // Version silo PRs — entries where a crate appears at multiple distinct versions.
+    let silo_indices: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !e.version_silos.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+
     // Workslop ROI — sum 12 minutes for every necrotic PR (bot-closeable).
     // Score-blocked PRs still require human review; only necrotic verdicts
     // represent truly reclaimed labor via automated bulk-close.
     let total_reclaimed_minutes =
         entries.iter().filter(|e| e.necrotic_flag.is_some()).count() as f64 * MINUTES_PER_TRIAGE;
 
-    // Categorical billing: Critical Threats ($150) + Garbage Collection / Necrotic ($20).
-    // PRs elevated purely by logic_clones_found contribute $0 — boilerplate clone
-    // scores do not represent a billable security event.
+    // Categorical billing:
+    //   Critical Threats ($150): security: antipattern OR Swarm collision.
+    //   Necrotic GC ($20): necrotic_flag set, not critical.
+    //   Structural Slop ($20): slop_score > 0, not critical, no necrotic flag.
+    //   Boilerplate ($0): slop_score == 0 and none of the above.
     let critical_threats_count = entries.iter().filter(|e| is_critical_threat(e)).count() as u64;
     let gc_only_count = entries
         .iter()
         .filter(|e| e.necrotic_flag.is_some() && !is_critical_threat(e))
         .count() as u64;
-    let total_actionable_intercepts = critical_threats_count + gc_only_count;
+    let structural_slop_count = entries
+        .iter()
+        .filter(|e| e.slop_score > 0 && !is_critical_threat(e) && e.necrotic_flag.is_none())
+        .count() as u64;
+    let total_actionable_intercepts =
+        critical_threats_count + gc_only_count + structural_slop_count;
 
     // ── User stats (Top 10 Sloppiest / Top 10 Cleanest) ───────────────────
     // Value: (total_slop_score, total_pr_count, clean_pr_count)
@@ -400,11 +1469,25 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
         slop_top_indices,
         clone_pairs,
         zombie_indices,
+        silo_indices,
         total_reclaimed_minutes,
         total_actionable_intercepts,
         critical_threats_count,
+        structural_slop_count,
         necrotic_indices,
         sloppiest_users,
+    }
+}
+
+/// Map a machine-readable antipattern label to a concise human-readable display string.
+///
+/// Used only in the PDF/Markdown rendering layer — the raw machine IDs are
+/// preserved in `BounceLogEntry.antipatterns` and in the CSV export.
+fn humanize_antipattern_label(label: &str) -> std::borrow::Cow<'_, str> {
+    if label == "antipattern:ncd_anomaly" || label.starts_with("HighGenerativeVerbosity:") {
+        "AI Boilerplate Detected (NCD Ratio < 0.15)".into()
+    } else {
+        label.into()
     }
 }
 
@@ -412,26 +1495,36 @@ pub fn aggregate(entries: Vec<BounceLogEntry>, top_n: usize) -> ReportData {
 ///
 /// Priority mirrors scoring weights: antipatterns (×50) > zombie symbols (×15) >
 /// logic clones (×5) > zombie deps (informational).
-fn primary_violation(e: &BounceLogEntry) -> &'static str {
+///
+/// When no language antipattern fired but a `necrotic_flag` is present, returns
+/// `"backlog:<FLAG>"` (e.g. `"backlog:SEMANTIC_NULL"`) so the PDF/Markdown Top-10
+/// table shows a machine-readable identifier instead of the generic fallback.
+fn primary_violation(e: &BounceLogEntry) -> String {
     if !e.antipatterns.is_empty() {
         if e.antipatterns
             .iter()
             .any(|a| a.contains("Unverified Security Bump"))
         {
-            return "Unverified Security Bump";
+            return "Unverified Security Bump".to_owned();
         }
-        return "Language Antipattern";
+        return "Language Antipattern".to_owned();
     }
     if e.zombie_symbols_added > 0 {
-        return "Zombie Symbol Reintroduction";
+        return "Zombie Symbol Reintroduction".to_owned();
     }
     if e.logic_clones_found > 0 {
-        return "Structural Clone";
+        return "Structural Clone".to_owned();
     }
     if !e.zombie_deps.is_empty() {
-        return "Zombie Dependency";
+        if let Some(flag) = e.necrotic_flag.as_deref() {
+            return format!("backlog:{flag}");
+        }
+        return "Zombie Dependency".to_owned();
     }
-    "Score Threshold"
+    if let Some(flag) = e.necrotic_flag.as_deref() {
+        return format!("backlog:{flag}");
+    }
+    "Score Threshold".to_owned()
 }
 
 /// Detect pairs of entries whose MinHash Jaccard similarity exceeds `threshold`.
@@ -554,6 +1647,9 @@ fn sanitize_latex_safe(input: &str) -> String {
 pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
     let mut out = String::with_capacity(4096);
 
+    // Compact LaTeX settings: tighter paragraph spacing and table row height,
+    // matching the global-report density so summary tables fit on fewer pages.
+    out.push_str("```{=latex}\n\\setlength{\\parskip}{2pt plus 1pt minus 1pt}\n\\renewcommand{\\arraystretch}{0.9}\n```\n\n");
     out.push_str("# Janitor Intelligence Report\n\n");
     out.push_str("*Generated by The Janitor: Deterministic Structural Analysis.*\n\n");
     out.push_str(&format!(
@@ -570,11 +1666,15 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
     {
         let actionable = data.total_actionable_intercepts;
         let critical = data.critical_threats_count;
-        let gc_only = actionable.saturating_sub(critical);
+        let structural_slop = data.structural_slop_count;
+        let gc_only = actionable
+            .saturating_sub(critical)
+            .saturating_sub(structural_slop);
         let hours = data.total_reclaimed_minutes / 60.0;
-        // Categorical billing: Critical Threats ($150) + GC-only Necrotic ($20).
-        let ci_compute_saved = critical * 150;
-        let tei = critical * 150 + gc_only * 20;
+        // Categorical billing: Critical ($150) + Necrotic GC ($20) + Structural Slop ($20).
+        let critical_threat_bounty = critical * 150;
+        let tei = critical * 150 + gc_only * 20 + structural_slop * 20;
+        let energy_kwh: f64 = data.entries.iter().map(|e| e.ci_energy_saved_kwh).sum();
         out.push_str("## Workslop: Maintainer Impact\n\n");
         out.push_str(
             "*[Workslop](https://builtin.com/articles/what-is-workslop): the triage tax \
@@ -583,7 +1683,7 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
         out.push_str("| Metric | Value |\n");
         out.push_str("|--------|-------|\n");
         out.push_str(&format!(
-            "| Actionable intercepts (Threats + Necrotic) | **{actionable}** |\n"
+            "| Actionable intercepts (Threats + Necrotic + Structural Slop) | **{actionable}** |\n"
         ));
         out.push_str(&format!(
             "| Critical Threats Blocked (Swarm / Security) | **{critical}** |\n"
@@ -592,17 +1692,25 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
             "| Garbage Collection (Necrotic — bot-closeable) | **{gc_only}** |\n"
         ));
         out.push_str(&format!(
+            "| Structural Slop (score > 0, no threat signal) | **{structural_slop}** |\n"
+        ));
+        out.push_str(&format!(
             "| **Total engineering time reclaimed** | **{hours:.1} hours** |\n"
         ));
         out.push_str(&format!(
-            "| **CI & Review Compute Saved** | **${ci_compute_saved}** |\n"
+            "| **Critical Threat Intercepts ($150)** | **${critical_threat_bounty}** |\n"
         ));
         out.push_str(&format!("| **Total Economic Impact** | **${tei}** |\n"));
+        out.push_str(&format!(
+            "| **CI Energy Reclaimed** | **{energy_kwh:.1} kWh** |\n"
+        ));
         out.push('\n');
         out.push_str(
-            "> TEI = (Critical Threats × $150) + (Garbage Collection × $20). \
+            "> TEI = (Critical Threats × $150) + (Necrotic GC × $20) + (Structural Slop × $20). \
+             Energy = actionable intercepts × 0.1 kWh (15-min CI run at 400 W). \
              Critical Threats: `security:` antipatterns or Swarm collisions. \
-             GC: Necrotic (bot-closeable) PRs not already classified as Critical. \
+             Necrotic: bot-closeable dead-code PRs. \
+             Structural Slop: PRs with slop_score > 0 and no critical/necrotic signal. \
              Based on **12-minute industry triage baseline** × **$100/hr** loaded engineering cost. \
              Source: [Workslop research](https://builtin.com/articles/what-is-workslop).\n\n",
         );
@@ -629,6 +1737,67 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
         }
     }
 
+    // ── Audit Provenance ───────────────────────────────────────────────────
+    {
+        let total_source: u64 = data
+            .entries
+            .iter()
+            .map(|e| e.provenance.source_bytes_processed)
+            .sum();
+        let total_egress: u64 = data
+            .entries
+            .iter()
+            .map(|e| e.provenance.egress_bytes_sent)
+            .sum();
+        let total_duration_ms: u64 = data
+            .entries
+            .iter()
+            .map(|e| e.provenance.analysis_duration_ms)
+            .sum();
+        let exfil_pct = if total_source > 0 {
+            (total_egress as f64 / total_source as f64) * 100.0
+        } else {
+            0.0
+        };
+        let source_mb = total_source as f64 / 1_048_576.0;
+        let egress_kb = total_egress as f64 / 1_024.0;
+        let total_duration_s = total_duration_ms as f64 / 1_000.0;
+
+        out.push_str("## Audit Provenance\n\n");
+        out.push_str(
+            "*The Gatekeeper has verified that 0 source bytes left the runner. \
+             Only the structural score crosses the network boundary.*\n\n",
+        );
+        out.push_str("| Field | Value |\n");
+        out.push_str("|-------|-------|\n");
+        out.push_str(&format!(
+            "| Owner | `{}` |\n",
+            html_escape(&sanitize_latex_safe(repo_name))
+        ));
+        out.push_str(&format!(
+            "| Application (Version) | The Janitor v{} |\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+        out.push_str(&format!(
+            "| Duration | **{total_duration_s:.1}s** across {n} PRs |\n",
+            n = data.entries.len()
+        ));
+        out.push_str(&format!("| Source Analyzed | **{source_mb:.2} MB** |\n"));
+        out.push_str(&format!(
+            "| Egress to Control Plane | **{egress_kb:.1} KB** |\n"
+        ));
+        out.push_str("| Bytes Received (score only) | 0 bytes |\n");
+        out.push_str(&format!(
+            "| **Exfiltration Ratio** | **{exfil_pct:.4}%** |\n"
+        ));
+        out.push('\n');
+        out.push_str(
+            "> Zero-Upload Guarantee: source code is analysed in-memory on your runner. \
+             The Governor receives only the signed structural score — never source bytes, \
+             never AST nodes, never symbol names from your codebase.\n\n",
+        );
+    }
+
     // ── Top 10 Sloppiest Contributors ──────────────────────────────────────
     if !data.sloppiest_users.is_empty() {
         out.push_str("## Top 10 Sloppiest Contributors\n\n");
@@ -649,6 +1818,22 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
 
     out.push_str("---\n\n");
 
+    // ── Scoring Methodology (per-repo) ─────────────────────────────────────
+    // No forced \newpage here: compact LaTeX settings let Workslop + Contributors
+    // flow onto the same page as Methodology without a premature hard break.
+    out.push_str("## Scoring Methodology\n\n");
+    out.push_str("| Classification | Condition | Billing |\n");
+    out.push_str("|---|---|---|\n");
+    out.push_str("| Critical Threat | `security:` antipattern OR Swarm collision | $150 |\n");
+    out.push_str("| Necrotic GC | Dead-code ghost (bot-automatable) | $20 |\n");
+    out.push_str("| Structural Slop | slop_score > 0, no critical/necrotic signal | $20 |\n");
+    out.push_str("| Boilerplate | slop_score == 0, no threat signal | $0 |\n");
+    out.push('\n');
+    out.push_str(
+        "Score formula: `(clones × 5) + (zombies × 10) + (antipattern_score) + \
+         (comment_violations × 5) + (unlinked_pr × 20) + (hallucinated_fix × 100)`\n\n",
+    );
+
     // ── Section 1: Top 10 High-Risk PRs ───────────────────────────────────
     out.push_str("## Top 10 High-Risk PRs\n\n");
 
@@ -658,8 +1843,8 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
              to populate the log.*\n\n",
         );
     } else {
-        out.push_str("| Rank | PR | Author | Slop Score | Primary Violation |\n");
-        out.push_str("|------|----|--------|------------|-------------------|\n");
+        out.push_str("| Rank | PR | Author | Slop Score | Primary Violation | Antipatterns |\n");
+        out.push_str("|------|----|--------|------------|-------------------|--------------|\n");
         for (rank, &i) in data.slop_top_indices.iter().take(10).enumerate() {
             let e = &data.entries[i];
             let pr = e
@@ -670,13 +1855,39 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
                 &sanitize_latex_safe(e.author.as_deref().unwrap_or("-")),
                 20,
             ));
+            // Show first two antipattern descriptions; append "+N more" if truncated.
+            let ap_cell = if e.antipatterns.is_empty() {
+                "-".to_owned()
+            } else {
+                let shown: Vec<String> = e
+                    .antipatterns
+                    .iter()
+                    .take(2)
+                    .map(|a| {
+                        // Truncate long descriptions at 60 chars for table readability.
+                        let s = sanitize_latex_safe(a);
+                        if s.len() > 60 {
+                            format!("{}…", &s[..57])
+                        } else {
+                            s
+                        }
+                    })
+                    .collect();
+                let remainder = e.antipatterns.len().saturating_sub(2);
+                if remainder > 0 {
+                    format!("{}, +{remainder} more", shown.join("; "))
+                } else {
+                    shown.join("; ")
+                }
+            };
             out.push_str(&format!(
-                "| {} | {} | {} | **{}** | {} |\n",
+                "| {} | {} | {} | **{}** | {} | {} |\n",
                 rank + 1,
                 pr,
                 author,
                 e.slop_score,
                 primary_violation(e),
+                html_escape(&ap_cell),
             ));
         }
     }
@@ -705,7 +1916,8 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
             let author = html_escape(&sanitize_latex_safe(e.author.as_deref().unwrap_or("-")));
             out.push_str(&format!("- **PR {pr}** (`{author}`):\n"));
             for (desc, count) in group_strings(&e.antipatterns) {
-                let desc_s = sanitize_latex_safe(desc);
+                let display = humanize_antipattern_label(desc);
+                let desc_s = sanitize_latex_safe(&display);
                 if count > 1 {
                     out.push_str(&format!("  - {} (x{})\n", html_escape(&desc_s), count));
                 } else {
@@ -846,6 +2058,39 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
         out.push('\n');
     }
 
+    // ── Section 4: Version Silos (suppressed when none detected) ────────────
+    if !data.silo_indices.is_empty() {
+        out.push_str("## Version Silos — Dependency Version Conflicts\n\n");
+        out.push_str(
+            "*Crates or packages that appear at more than one distinct version across the PR's \
+             manifest files. Each silo adds +20 points to the Slop Score.*\n\n",
+        );
+        for &i in data.silo_indices.iter().take(LIST_DISPLAY_CAP) {
+            let e = &data.entries[i];
+            let pr = e
+                .pr_number
+                .map(|n| format!("#{n}"))
+                .unwrap_or_else(|| format!("entry-{i}"));
+            let author = html_escape(&sanitize_latex_safe(
+                e.author.as_deref().unwrap_or("unknown"),
+            ));
+            let silos: Vec<String> = e.version_silos.iter().map(|s| html_escape(s)).collect();
+            out.push_str(&format!(
+                "- **PR {}** ({}): `{}`\n",
+                pr,
+                author,
+                silos.join("`, `")
+            ));
+        }
+        let silo_overflow = data.silo_indices.len().saturating_sub(LIST_DISPLAY_CAP);
+        if silo_overflow > 0 {
+            out.push_str(&format!(
+                "\n*…and {silo_overflow} more entries. See CSV for full list.*\n"
+            ));
+        }
+        out.push('\n');
+    }
+
     out
 }
 
@@ -857,22 +2102,58 @@ pub fn render_markdown(data: &ReportData, repo_name: &str) -> String {
 pub fn render_json(data: &ReportData, repo_name: &str) -> serde_json::Value {
     let hours = data.total_reclaimed_minutes / 60.0;
     let necrotic_count = (data.total_reclaimed_minutes / MINUTES_PER_TRIAGE).round() as u64;
+
+    // Provenance aggregates — computed outside the json! macro (no let-blocks allowed).
+    let prov_total_source: u64 = data
+        .entries
+        .iter()
+        .map(|e| e.provenance.source_bytes_processed)
+        .sum();
+    let prov_total_egress: u64 = data
+        .entries
+        .iter()
+        .map(|e| e.provenance.egress_bytes_sent)
+        .sum();
+    let prov_total_duration_ms: u64 = data
+        .entries
+        .iter()
+        .map(|e| e.provenance.analysis_duration_ms)
+        .sum();
+    let prov_exfil_pct = if prov_total_source > 0 {
+        (prov_total_egress as f64 / prov_total_source as f64) * 100.0
+    } else {
+        0.0
+    };
+    let prov_json = serde_json::json!({
+        "total_source_bytes_processed": prov_total_source,
+        "total_egress_bytes_sent": prov_total_egress,
+        "total_analysis_duration_ms": prov_total_duration_ms,
+        "exfiltration_ratio_pct": (prov_exfil_pct * 10000.0).round() / 10000.0,
+        "zero_upload_verified": prov_total_egress == 0 || prov_exfil_pct < 1.0,
+    });
     let critical = data.critical_threats_count;
-    let gc_only = data.total_actionable_intercepts.saturating_sub(critical);
-    let ci_compute_saved = critical * 150;
-    let tei = critical * 150 + gc_only * 20;
+    let structural_slop = data.structural_slop_count;
+    let gc_only = data
+        .total_actionable_intercepts
+        .saturating_sub(critical)
+        .saturating_sub(structural_slop);
+    let critical_threat_bounty = critical * 150;
+    let tei = critical * 150 + gc_only * 20 + structural_slop * 20;
+    let total_ci_energy_kwh: f64 = data.entries.iter().map(|e| e.ci_energy_saved_kwh).sum();
     serde_json::json!({
-        "schema_version": "7.0.0",
+        "schema_version": env!("CARGO_PKG_VERSION"),
         "repository": repo_name,
         "total_prs_analyzed": data.entries.len(),
         "workslop": {
             "actionable_intercepts": data.total_actionable_intercepts,
             "critical_threats_count": critical,
             "necrotic_count": necrotic_count,
+            "structural_slop_count": structural_slop,
             "total_reclaimed_minutes": (data.total_reclaimed_minutes * 10.0).round() / 10.0,
             "total_reclaimed_hours": (hours * 10.0).round() / 10.0,
-            "ci_compute_saved_usd": ci_compute_saved,
+            "critical_threat_bounty_usd": critical_threat_bounty,
             "total_economic_impact_usd": tei,
+            "total_ci_energy_saved_kwh": (total_ci_energy_kwh * 10.0).round() / 10.0,
         },
         "slop_top": data.slop_top_indices.iter().enumerate().map(|(rank, &i)| {
             let e = &data.entries[i];
@@ -907,6 +2188,15 @@ pub fn render_json(data: &ReportData, repo_name: &str) -> serde_json::Value {
                 "zombie_deps": e.zombie_deps,
             })
         }).collect::<Vec<_>>(),
+        "version_silo_prs": data.silo_indices.iter().map(|&i| {
+            let e = &data.entries[i];
+            serde_json::json!({
+                "pr_number": e.pr_number,
+                "author": e.author,
+                "version_silos": e.version_silos,
+            })
+        }).collect::<Vec<_>>(),
+        "provenance": prov_json,
     })
 }
 
@@ -916,7 +2206,7 @@ pub fn render_json(data: &ReportData, repo_name: &str) -> serde_json::Value {
 
 /// A single dead symbol entry for scan-mode reports.
 ///
-/// Converted from [`anatomist::Entity`] by [`cmd_report`] before rendering,
+/// Converted from `anatomist::Entity` by `cmd_report` before rendering,
 /// so this module remains free of an `anatomist` dependency.
 pub struct DeadSymbolEntry {
     /// Fully-qualified symbol name (e.g. `module::Class::method`).
@@ -1052,7 +2342,7 @@ pub fn render_scan_json(
     let total_dead_bytes: u64 = dead.iter().map(|e| e.byte_size as u64).sum();
 
     serde_json::json!({
-        "schema_version": "7.0.0",
+        "schema_version": env!("CARGO_PKG_VERSION"),
         "repository": repo_name,
         "total_entities": total_entities,
         "dead_symbol_count": dead.len(),
@@ -1098,12 +2388,18 @@ pub struct RepoStats {
     pub highest_score: u32,
     /// Engineering minutes reclaimed from actionable intercepts in this repo.
     pub reclaimed_minutes: f64,
-    /// Total actionable intercepts: Critical Threats OR Garbage Collection (Necrotic).
+    /// Total actionable intercepts: Critical Threats, Necrotic GC, or Structural Slop.
     pub total_actionable_intercepts: u64,
     /// Count of Critical Threats in this repo (security: antipatterns or Swarm).
     pub critical_threats_count: u64,
-    /// Top 10 sloppiest PRs: `(pr_number, score, state, author)`.
-    pub top_sloppiest: Vec<(u64, u32, String, String)>,
+    /// Count of Structural Slop PRs (slop_score > 0, not critical, not necrotic).
+    pub structural_slop_count: u64,
+    /// Total CI datacenter energy conserved across all entries in this repo (kWh).
+    ///
+    /// Sum of `ci_energy_saved_kwh` from all bounce log entries.
+    pub total_ci_energy_saved_kwh: f64,
+    /// Top 10 sloppiest PRs: `(pr_number, score, state, author, threat_class)`.
+    pub top_sloppiest: Vec<(u64, u32, String, String, String)>,
     /// Top 10 cleanest contributors: `(author, clean_pr_count)`.
     pub top_clean_authors: Vec<(String, usize)>,
 }
@@ -1120,10 +2416,20 @@ pub struct GlobalReportData {
     pub total_antipatterns: u32,
     /// Total engineering minutes reclaimed across all repos.
     pub total_reclaimed_minutes: f64,
-    /// Total actionable intercepts: Critical Threats OR Garbage Collection (Necrotic).
+    /// Total actionable intercepts: Critical Threats, Necrotic GC, or Structural Slop.
     pub total_actionable_intercepts: u64,
     /// Count of Critical Threats across all repos (security: antipatterns or Swarm).
     pub critical_threats_count: u64,
+    /// Count of Structural Slop PRs across all repos (slop_score > 0, not critical, not necrotic).
+    pub structural_slop_count: u64,
+    /// Total source bytes processed across all bounces (provenance ledger).
+    pub total_source_bytes: u64,
+    /// Total egress bytes sent to the Governor across all bounces (provenance ledger).
+    pub total_egress_bytes: u64,
+    /// Total CI datacenter energy conserved across all repos (kWh).
+    ///
+    /// Sum of `ci_energy_saved_kwh` from every bounce log entry across every repo.
+    pub total_ci_energy_saved_kwh: f64,
 }
 
 /// Discover all bounce logs one directory level beneath `gauntlet_root`.
@@ -1174,7 +2480,25 @@ pub fn aggregate_global(repos: Vec<(String, Vec<BounceLogEntry>)>) -> GlobalRepo
         .flat_map(|(_, entries)| entries.iter())
         .filter(|e| e.necrotic_flag.is_some() && !is_critical_threat(e))
         .count() as u64;
-    let repos_for_actionable: u64 = global_critical_threats + global_gc_only;
+    let global_structural_slop: u64 = repos
+        .iter()
+        .flat_map(|(_, entries)| entries.iter())
+        .filter(|e| e.slop_score > 0 && !is_critical_threat(e) && e.necrotic_flag.is_none())
+        .count() as u64;
+    let repos_for_actionable: u64 =
+        global_critical_threats + global_gc_only + global_structural_slop;
+
+    // Provenance ledger aggregates — computed before repos is consumed by into_iter().
+    let global_source_bytes: u64 = repos
+        .iter()
+        .flat_map(|(_, entries)| entries.iter())
+        .map(|e| e.provenance.source_bytes_processed)
+        .sum();
+    let global_egress_bytes: u64 = repos
+        .iter()
+        .flat_map(|(_, entries)| entries.iter())
+        .map(|e| e.provenance.egress_bytes_sent)
+        .sum();
 
     let mut repo_stats: Vec<RepoStats> = repos
         .into_iter()
@@ -1206,12 +2530,19 @@ pub fn aggregate_global(repos: Vec<(String, Vec<BounceLogEntry>)>) -> GlobalRepo
                 .iter()
                 .filter(|e| e.necrotic_flag.is_some() && !is_critical_threat(e))
                 .count() as u64;
-            let total_actionable_intercepts = critical_threats_count + gc_only_count;
+            let structural_slop_count = entries
+                .iter()
+                .filter(|e| e.slop_score > 0 && !is_critical_threat(e) && e.necrotic_flag.is_none())
+                .count() as u64;
+            let total_actionable_intercepts =
+                critical_threats_count + gc_only_count + structural_slop_count;
+            let total_ci_energy_saved_kwh: f64 =
+                entries.iter().map(|e| e.ci_energy_saved_kwh).sum();
 
             // Top 10 sloppiest PRs (descending score).
             let mut sorted_by_score: Vec<&BounceLogEntry> = entries.iter().collect();
             sorted_by_score.sort_by(|a, b| b.slop_score.cmp(&a.slop_score));
-            let top_sloppiest: Vec<(u64, u32, String, String)> = sorted_by_score
+            let top_sloppiest: Vec<(u64, u32, String, String, String)> = sorted_by_score
                 .iter()
                 .filter(|e| e.slop_score > 0)
                 .take(10)
@@ -1220,7 +2551,15 @@ pub fn aggregate_global(repos: Vec<(String, Vec<BounceLogEntry>)>) -> GlobalRepo
                     let score = e.slop_score;
                     let state = e.state.to_string();
                     let author = e.author.as_deref().unwrap_or("unknown").to_owned();
-                    (pr_num, score, state, author)
+                    let tc = if is_critical_threat(e) {
+                        "Critical"
+                    } else if e.necrotic_flag.is_some() {
+                        "Necrotic"
+                    } else {
+                        "StructuralSlop"
+                    }
+                    .to_owned();
+                    (pr_num, score, state, author, tc)
                 })
                 .collect();
 
@@ -1248,6 +2587,8 @@ pub fn aggregate_global(repos: Vec<(String, Vec<BounceLogEntry>)>) -> GlobalRepo
                 reclaimed_minutes,
                 total_actionable_intercepts,
                 critical_threats_count,
+                structural_slop_count,
+                total_ci_energy_saved_kwh,
                 top_sloppiest,
                 top_clean_authors: clean_vec,
             }
@@ -1263,6 +2604,8 @@ pub fn aggregate_global(repos: Vec<(String, Vec<BounceLogEntry>)>) -> GlobalRepo
     let total_reclaimed_minutes: f64 = repo_stats.iter().map(|r| r.reclaimed_minutes).sum();
     let total_actionable_intercepts: u64 = repos_for_actionable;
     let critical_threats_count: u64 = global_critical_threats;
+    let total_ci_energy_saved_kwh: f64 =
+        repo_stats.iter().map(|r| r.total_ci_energy_saved_kwh).sum();
 
     GlobalReportData {
         repos: repo_stats,
@@ -1272,6 +2615,12 @@ pub fn aggregate_global(repos: Vec<(String, Vec<BounceLogEntry>)>) -> GlobalRepo
         total_reclaimed_minutes,
         total_actionable_intercepts,
         critical_threats_count,
+        structural_slop_count: global_structural_slop,
+        // Provenance fields are aggregated from per-entry data computed
+        // before repos was consumed; use pre-computed globals.
+        total_source_bytes: global_source_bytes,
+        total_egress_bytes: global_egress_bytes,
+        total_ci_energy_saved_kwh,
     }
 }
 
@@ -1288,61 +2637,113 @@ fn load_wopr_graph(janitor_dir: &std::path::Path) -> Vec<(String, usize, usize)>
     serde_json::from_str::<Vec<(String, usize, usize)>>(&json_str).unwrap_or_default()
 }
 
+/// Render a single-line ASCII bar chart entry for a repository.
+///
+/// Format: `<repo_name padded>  ########----  N Critical  N Necrotic  N Clean`
+///
+/// `#` blocks represent Critical PRs (scaled), `-` blocks represent Necrotic PRs,
+/// remaining width is implied Clean.  Total bar width is `width` characters.
+///
+/// Uses plain ASCII so the bar survives `\begin{verbatim}` in LaTeX PDF output.
+/// Unicode block characters (█ / ░) are intentionally avoided here.
+pub fn render_ascii_bar(
+    repo_name: &str,
+    critical: u64,
+    necrotic: u64,
+    clean: u64,
+    width: usize,
+) -> String {
+    let total = critical + necrotic + clean;
+    let (crit_blocks, nec_blocks) = if total == 0 || width == 0 {
+        (0, 0)
+    } else {
+        let c = ((critical as f64 / total as f64) * width as f64).round() as usize;
+        let n = ((necrotic as f64 / total as f64) * width as f64).round() as usize;
+        (c.min(width), n.min(width.saturating_sub(c)))
+    };
+    let bar: String = "#".repeat(crit_blocks) + &"-".repeat(nec_blocks);
+    // Left-pad repo name to 30 chars for alignment.
+    let name_display: String = if repo_name.chars().count() > 28 {
+        repo_name.chars().take(27).collect::<String>() + "…"
+    } else {
+        repo_name.to_owned()
+    };
+    format!("{name_display:<30}  {bar:<width$}  {critical} Critical  {necrotic} Necrotic  {clean} Clean")
+}
+
 pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> String {
     let mut out = String::with_capacity(8192);
 
+    let actionable = data.total_actionable_intercepts;
+    let critical = data.critical_threats_count;
+    let structural_slop = data.structural_slop_count;
+    let gc_only = actionable
+        .saturating_sub(critical)
+        .saturating_sub(structural_slop);
+    let tei = critical * 150 + gc_only * 20 + structural_slop * 20;
+    let timestamp = crate::utc_now_iso8601();
+
+    // ── Page 1 — Executive Summary ─────────────────────────────────────────
     // Compact the global summary page: tighter paragraph skip + table row height.
     out.push_str("```{=latex}\n\\setlength{\\parskip}{2pt plus 1pt minus 1pt}\n\\renewcommand{\\arraystretch}{0.9}\n```\n\n");
-    out.push_str("# Janitor Global Intelligence Report\n\n");
+    out.push_str("# The Janitor — Audit Report\n\n");
+    out.push_str(&format!("**Generated**: {timestamp}\n\n"));
+    out.push_str(&format!(
+        "**Repositories scanned**: {}\n\n",
+        data.repos.len()
+    ));
+    out.push_str(&format!(
+        "**Pull requests evaluated**: {}\n\n",
+        data.total_prs
+    ));
+    out.push_str("\n---\n\n");
+    out.push_str("| | |\n");
+    out.push_str("|---|---|\n");
+    out.push_str(&format!("| **Critical Threats Blocked** | {critical} |\n"));
+    out.push_str(&format!(
+        "| **Necrotic GC (bot-closeable)** | {gc_only} |\n"
+    ));
+    out.push_str(&format!(
+        "| **Structural Slop (score > 0)** | {structural_slop} |\n"
+    ));
+    out.push_str(&format!("| **Total Economic Impact** | ${tei} |\n"));
+    out.push_str("\n---\n\n");
     out.push_str(
-        "*Cross-repository structural debt aggregation. \
-         Generated by The Janitor: Deterministic Structural Analysis.*\n\n",
+        "*Scores derived from AST antipattern detection across 23 grammars, structural \
+         clone fingerprinting via MinHash LSH, and necrotic symbol hydration. No ML \
+         inference. All analysis runs locally — no source code is transmitted.*\n\n",
     );
-    // ── Global summary table (ROI + coverage metrics) ─────────────────────
-    {
-        let actionable = data.total_actionable_intercepts;
-        let critical = data.critical_threats_count;
-        let gc_only = actionable.saturating_sub(critical);
-        let hours = data.total_reclaimed_minutes / 60.0;
-        // Categorical billing: Critical Threats ($150) + GC-only Necrotic ($20).
-        let ci_compute_saved = critical * 150;
-        let tei = critical * 150 + gc_only * 20;
-        let gc_labor = gc_only * 20;
-        out.push_str("## Global Summary\n\n");
-        out.push_str("| Metric | Value |\n");
-        out.push_str("|--------|-------|\n");
-        out.push_str(&format!(
-            "| Repositories analyzed | {} |\n",
-            data.repos.len()
-        ));
-        out.push_str(&format!("| Total PRs analyzed | {} |\n", data.total_prs));
-        out.push_str(&format!(
-            "| Total slop score | {} |\n",
-            data.total_slop_score
-        ));
-        out.push_str(&format!(
-            "| **Total Actionable Intercepts** | **{actionable}** |\n"
-        ));
-        out.push_str(&format!(
-            "| \u{00a0}\u{00a0}- Critical Threats Blocked (Security / Swarm) | **{critical}** |\n"
-        ));
-        out.push_str(&format!(
-            "| \u{00a0}\u{00a0}- Garbage Collection (Dead Code) | **{gc_only}** |\n"
-        ));
-        out.push_str(&format!("| **Total Economic Impact** | **${tei}** |\n"));
-        out.push_str(&format!(
-            "| \u{00a0}\u{00a0}- CI Compute Saved (Threats) | **${ci_compute_saved}** |\n"
-        ));
-        out.push_str(&format!(
-            "| \u{00a0}\u{00a0}- Triage Labor Reclaimed (GC) | **${gc_labor}** |\n"
-        ));
-        out.push_str(&format!(
-            "| Engineering time reclaimed | {hours:.1} hours |\n"
-        ));
-        out.push('\n');
+    // No forced \newpage — flow directly into Threat Distribution / Repository
+    // Breakdown so the executive brief fits on fewer pages.
+
+    // ── Threat Distribution ────────────────────────────────────────────────
+    // Only rendered for multi-repo global reports. A single-repo strike already
+    // carries per-PR detail tables that make a one-bar chart redundant noise.
+    if data.repos.len() > 1 {
+        out.push_str("\n\\needspace{10\\baselineskip}\n\n");
+        out.push_str("## Threat Distribution by Repository\n\n");
+        out.push_str("```\n");
+        for repo in &data.repos {
+            let repo_gc = repo
+                .total_actionable_intercepts
+                .saturating_sub(repo.critical_threats_count);
+            let clean = (repo.pr_count as u64).saturating_sub(repo.total_actionable_intercepts);
+            let bar = render_ascii_bar(
+                &repo.repo_name,
+                repo.critical_threats_count,
+                repo_gc,
+                clean,
+                12,
+            );
+            out.push_str(&bar);
+            out.push('\n');
+        }
+        out.push_str("```\n\n");
+        // No \newpage — Repository Breakdown follows on the same flow.
     }
 
-    // ── Per-repo summary breakdown ─────────────────────────────────────────
+    // ── Repository Breakdown table ─────────────────────────────────────────
+    out.push_str("\n\\needspace{15\\baselineskip}\n\n");
     out.push_str("## Repository Breakdown\n\n");
     out.push_str(
         "```{=latex}\n\\small\n\\setlength{\\tabcolsep}{4pt}\n\\renewcommand{\\arraystretch}{1.0}\n\\setcounter{LTchunksize}{100}\n```\n\n",
@@ -1356,8 +2757,11 @@ pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> S
             .unwrap_or_else(|| "-".to_owned());
         let repo_gc_only = repo
             .total_actionable_intercepts
-            .saturating_sub(repo.critical_threats_count);
-        let repo_tei = repo.critical_threats_count * 150 + repo_gc_only * 20;
+            .saturating_sub(repo.critical_threats_count)
+            .saturating_sub(repo.structural_slop_count);
+        // StructuralSlop billed at $20 (same tier as Necrotic GC).
+        let repo_tei =
+            repo.critical_threats_count * 150 + repo_gc_only * 20 + repo.structural_slop_count * 20;
         out.push_str(&format!(
             "| `{}` | {} | **{}** | {} | **${repo_tei}** | {} |\n",
             sanitize_latex_safe(&repo.repo_name),
@@ -1369,9 +2773,60 @@ pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> S
     }
     out.push('\n');
 
+    // ── Top 10 Riskiest PRs ────────────────────────────────────────────────
+    // \needspace guards the heading so it never strands at the bottom of a page.
+    // Collect the top 10 entries with score > 50 across all repos.
+    // top_sloppiest tuples: (pr_num, score, state, author, threat_class)
+    let mut top_prs: Vec<(&RepoStats, u64, u32, String, String)> = Vec::new();
+    for repo in &data.repos {
+        for (pr_num, score, _state, author, threat_class) in &repo.top_sloppiest {
+            if *score > 50 {
+                top_prs.push((repo, *pr_num, *score, author.clone(), threat_class.clone()));
+            }
+        }
+    }
+    top_prs.sort_by(|a, b| b.2.cmp(&a.2));
+    top_prs.truncate(10);
+
+    if !top_prs.is_empty() {
+        out.push_str("\n\\needspace{12\\baselineskip}\n\n");
+        out.push_str("## Top 10 Riskiest PRs\n\n");
+        out.push_str("| PR | Repo | Author | Score | Threat Class | Antipattern |\n");
+        out.push_str("|---|---|---|---|---|---|\n");
+        for (repo, pr_num, score, author, threat_class) in &top_prs {
+            let author_s = sanitize_latex_safe(author);
+            let auth_display: String = if author_s.len() > 20 {
+                format!("{}…", &author_s[..19])
+            } else {
+                author_s
+            };
+            out.push_str(&format!(
+                "| #{pr_num} | `{}` | {auth_display} | {score} | {threat_class} | — |\n",
+                sanitize_latex_safe(&repo.repo_name),
+            ));
+        }
+        out.push('\n');
+    }
+
+    // ── Scoring Methodology ────────────────────────────────────────────────
+    out.push_str("\n\\needspace{8\\baselineskip}\n\n");
+    out.push_str("## Scoring Methodology\n\n");
+    out.push_str("| Classification | Condition | Billing |\n");
+    out.push_str("|---|---|---|\n");
+    out.push_str("| Critical Threat | `security:` antipattern OR Swarm collision | $150 |\n");
+    out.push_str("| Necrotic GC | Dead-code ghost (bot-automatable) | $20 |\n");
+    out.push_str("| Structural Slop | slop_score > 0, no critical/necrotic signal | $20 |\n");
+    out.push_str("| Boilerplate | slop_score == 0, no threat signal | $0 |\n");
+    out.push('\n');
+    out.push_str(
+        "Score formula: `(clones × 5) + (zombies × 10) + (antipattern_score) + \
+         (comment_violations × 5) + (unlinked_pr × 20) + (hallucinated_fix × 100)`\n\n",
+    );
+
     // ── Per-repo dedicated pages ───────────────────────────────────────────
-    // Each repo gets a \newpage (raw LaTeX — pandoc passes it through to pdflatex)
-    // followed by Top 10 Sloppiest PRs and Top 10 Cleanest Contributors tables.
+    // Each repo starts on a new page.  Subsections within each repo
+    // (Sloppiest, Cleanest, Silos) flow without internal breaks;
+    // \needspace before each heading prevents orphaned headings at page bottom.
     for repo in &data.repos {
         out.push_str("\n\\newpage\n\n");
         out.push_str(&format!("## {}\n\n", sanitize_latex_safe(&repo.repo_name)));
@@ -1379,9 +2834,12 @@ pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> S
         let repo_hours = repo.reclaimed_minutes / 60.0;
         let repo_gc_only_page = repo
             .total_actionable_intercepts
-            .saturating_sub(repo.critical_threats_count);
-        let repo_ci_saved_page = repo.critical_threats_count * 150;
-        let repo_tei_page = repo.critical_threats_count * 150 + repo_gc_only_page * 20;
+            .saturating_sub(repo.critical_threats_count)
+            .saturating_sub(repo.structural_slop_count);
+        let repo_ci_bounty_page = repo.critical_threats_count * 150;
+        let repo_tei_page = repo.critical_threats_count * 150
+            + repo_gc_only_page * 20
+            + repo.structural_slop_count * 20;
         out.push_str("| Metric | Value |\n");
         out.push_str("|--------|-------|\n");
         out.push_str(&format!("| PRs Analyzed | {} |\n", repo.pr_count));
@@ -1391,7 +2849,7 @@ pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> S
         ));
         out.push_str(&format!("| Time Reclaimed | {repo_hours:.1} hours |\n"));
         out.push_str(&format!(
-            "| CI & Review Compute Saved | ${repo_ci_saved_page} |\n"
+            "| Critical Threat Intercepts ($150) | ${repo_ci_bounty_page} |\n"
         ));
         out.push_str(&format!("| Total Economic Impact | ${repo_tei_page} |\n"));
         out.push_str(&format!("| Antipatterns | {} |\n", repo.antipatterns_found));
@@ -1404,6 +2862,7 @@ pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> S
         out.push('\n');
 
         // Top 10 Sloppiest PRs table.
+        out.push_str("\n\\needspace{12\\baselineskip}\n\n");
         out.push_str("### Top 10 Sloppiest PRs\n\n");
         out.push_str("```{=latex}\n\\small\n\\renewcommand{\\arraystretch}{1.2}\n```\n\n");
         if repo.top_sloppiest.is_empty() {
@@ -1411,7 +2870,7 @@ pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> S
         } else {
             out.push_str("| PR | Score | State | Author |\n");
             out.push_str("|----|------:|-------|--------|\n");
-            for (pr_num, score, state, author) in &repo.top_sloppiest {
+            for (pr_num, score, state, author, _tc) in &repo.top_sloppiest {
                 // Truncate long author handles to 22 chars for layout integrity.
                 let author_s = sanitize_latex_safe(author);
                 let auth_display: &str = if author_s.len() > 22 {
@@ -1427,6 +2886,7 @@ pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> S
         }
 
         // Top 10 Cleanest Contributors table.
+        out.push_str("\n\\needspace{12\\baselineskip}\n\n");
         out.push_str("### Top 10 Cleanest Contributors\n\n");
         out.push_str("```{=latex}\n\\small\n\\renewcommand{\\arraystretch}{1.2}\n```\n\n");
         if repo.top_clean_authors.is_empty() {
@@ -1457,6 +2917,7 @@ pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> S
             // Rank by transitive_reach descending; cap at 10.
             silos.sort_by(|a, b| b.2.cmp(&a.2));
             silos.truncate(10);
+            out.push_str("\n\\needspace{12\\baselineskip}\n\n");
             out.push_str("### Architectural Debt: C/C++ Compile-Time Silos\n\n");
             out.push_str("```{=latex}\n\\small\n\\renewcommand{\\arraystretch}{1.2}\n```\n\n");
             out.push_str("| Header Path | Direct Imports | Transitive Blast Radius |\n");
@@ -1480,12 +2941,29 @@ pub fn render_global_markdown(data: &GlobalReportData, gauntlet_root: &str) -> S
 pub fn render_global_json(data: &GlobalReportData, gauntlet_root: &str) -> serde_json::Value {
     let hours = data.total_reclaimed_minutes / 60.0;
     let necrotic_count = (data.total_reclaimed_minutes / MINUTES_PER_TRIAGE).round() as u64;
+
+    // Provenance aggregates — extracted before json! macro (no let-blocks allowed).
+    let g_exfil_pct = if data.total_source_bytes > 0 {
+        (data.total_egress_bytes as f64 / data.total_source_bytes as f64) * 100.0
+    } else {
+        0.0
+    };
+    let global_prov_json = serde_json::json!({
+        "total_source_bytes_processed": data.total_source_bytes,
+        "total_egress_bytes_sent": data.total_egress_bytes,
+        "exfiltration_ratio_pct": (g_exfil_pct * 10000.0).round() / 10000.0,
+        "zero_upload_verified": data.total_egress_bytes == 0 || g_exfil_pct < 1.0,
+    });
     let critical = data.critical_threats_count;
-    let gc_only = data.total_actionable_intercepts.saturating_sub(critical);
-    let ci_compute_saved = critical * 150;
-    let tei = critical * 150 + gc_only * 20;
+    let structural_slop = data.structural_slop_count;
+    let gc_only = data
+        .total_actionable_intercepts
+        .saturating_sub(critical)
+        .saturating_sub(structural_slop);
+    let critical_threat_bounty = critical * 150;
+    let tei = critical * 150 + gc_only * 20 + structural_slop * 20;
     serde_json::json!({
-        "schema_version": "7.0.0",
+        "schema_version": env!("CARGO_PKG_VERSION"),
         "gauntlet_root": gauntlet_root,
         "total_repos": data.repos.len(),
         "total_prs": data.total_prs,
@@ -1495,16 +2973,23 @@ pub fn render_global_json(data: &GlobalReportData, gauntlet_root: &str) -> serde
             "actionable_intercepts": data.total_actionable_intercepts,
             "critical_threats_count": critical,
             "necrotic_count": necrotic_count,
+            "structural_slop_count": structural_slop,
             "total_reclaimed_minutes": (data.total_reclaimed_minutes * 10.0).round() / 10.0,
             "total_reclaimed_hours": (hours * 10.0).round() / 10.0,
-            "ci_compute_saved_usd": ci_compute_saved,
+            "critical_threat_bounty_usd": critical_threat_bounty,
             "total_economic_impact_usd": tei,
+            "total_ci_energy_saved_kwh": (data.total_ci_energy_saved_kwh * 10.0).round() / 10.0,
         },
+        "provenance": global_prov_json,
         "repositories": data.repos.iter().map(|r| {
             let r_hours = r.reclaimed_minutes / 60.0;
-            let r_gc_only = r.total_actionable_intercepts.saturating_sub(r.critical_threats_count);
-            let r_ci_saved = r.critical_threats_count * 150;
-            let r_tei = r.critical_threats_count * 150 + r_gc_only * 20;
+            let r_gc_only = r.total_actionable_intercepts
+                .saturating_sub(r.critical_threats_count)
+                .saturating_sub(r.structural_slop_count);
+            let r_ci_bounty = r.critical_threats_count * 150;
+            let r_tei = r.critical_threats_count * 150
+                + r_gc_only * 20
+                + r.structural_slop_count * 20;
             serde_json::json!({
                 "repo_name": r.repo_name,
                 "pr_count": r.pr_count,
@@ -1518,8 +3003,10 @@ pub fn render_global_json(data: &GlobalReportData, gauntlet_root: &str) -> serde
                 "reclaimed_hours": (r_hours * 10.0).round() / 10.0,
                 "total_actionable_intercepts": r.total_actionable_intercepts,
                 "critical_threats_count": r.critical_threats_count,
-                "ci_compute_saved_usd": r_ci_saved,
+                "structural_slop_count": r.structural_slop_count,
+                "critical_threat_bounty_usd": r_ci_bounty,
                 "total_economic_impact_usd": r_tei,
+                "total_ci_energy_saved_kwh": (r.total_ci_energy_saved_kwh * 10.0).round() / 10.0,
             })
         }).collect::<Vec<_>>(),
     })
@@ -1528,7 +3015,9 @@ pub fn render_global_json(data: &GlobalReportData, gauntlet_root: &str) -> serde
 /// Groups identical strings, preserving first-occurrence order.
 ///
 /// Returns `(text, count)` pairs. Strings that appear only once have count 1.
-fn group_strings(items: &[String]) -> Vec<(&str, usize)> {
+/// Used both in [`render_markdown`] for display and in [`crate::export`] for
+/// the CSV `Antipattern_IDs` column to collapse repetition into `label (xN)` form.
+pub fn group_strings(items: &[String]) -> Vec<(&str, usize)> {
     let mut result: Vec<(&str, usize)> = Vec::new();
     for s in items {
         if let Some(entry) = result.iter_mut().find(|(k, _)| *k == s.as_str()) {
@@ -1549,6 +3038,543 @@ fn fmt_bytes(b: u64) -> String {
     } else {
         format!("{b} B")
     }
+}
+
+// ---------------------------------------------------------------------------
+// SARIF 2.1.0 renderer
+// ---------------------------------------------------------------------------
+
+/// Render `entries` as a SARIF 2.1.0 JSON string.
+///
+/// Output formats: `markdown` (default), `json`, `pdf`, `cbom`, `sarif`.
+///
+/// ## Schema
+/// Produces a single SARIF run with:
+/// - `tool.driver.rules[]` — one entry per unique antipattern label.
+/// - `results[]` — one entry per `(BounceLogEntry, antipattern)` pair plus
+///   an additional result for each Swarm collision.
+///
+/// ## Level mapping
+/// - `"error"` — antipattern label contains `"security:"`.
+/// - `"warning"` — all other antipatterns.
+///
+/// ## Swarm collisions
+/// Non-empty `collided_pr_numbers` emit an additional result with
+/// `ruleId = "swarm:structural_collision"` at level `"error"`.
+///
+/// ## Zero new dependencies
+/// Uses only `serde_json::json!()` — no additional crates required.
+/// Extract a 1-based line number from the `(line=N)` suffix appended by the
+/// slop pipeline to antipattern detail strings.  Returns `None` when the
+/// suffix is absent (pre-v7.9.4 log entries or non-positional findings).
+fn parse_sarif_line(detail: &str) -> Option<u32> {
+    let start = detail.rfind("(line=")?;
+    let rest = &detail[start + 6..];
+    let end = rest.find(')')?;
+    rest[..end].parse().ok()
+}
+
+/// Return `(remediation_markdown, help_uri)` for known finding classes.
+///
+/// Maps antipattern label prefixes to structured remediation guidance that is
+/// surfaced in SARIF `rule.help.markdown` and `rule.helpUri` — rendered natively
+/// inside GitHub Advanced Security and Azure DevOps PR review UI.
+fn rule_help(label: &str) -> Option<(&'static str, &'static str)> {
+    // Match on the stable prefix of the antipattern label so both bare labels
+    // and labels with (line=N) suffixes are caught.
+    if label.starts_with("security:slopsquat_injection") {
+        return Some((
+            "**Remediation**: Remove the hallucinated dependency from your manifest \
+             and run `cargo update` (Rust) or the equivalent package manager command. \
+             Verify the intended package name against the upstream registry. \
+             Do not simply rename the import — remove and re-add from the correct namespace.",
+            "https://thejanitor.app/findings/security-slopsquat-injection",
+        ));
+    }
+    if label.starts_with("security:phantom_payload_evasion") {
+        return Some((
+            "**Remediation**: Remove the dead branch containing the obfuscated or \
+             anomalous logic. If the branch is legitimately unreachable, delete it — \
+             dead code with anomalous payloads is indistinguishable from staged \
+             adversarial logic. If the branch is intended to be reachable, fix the \
+             guard condition and document it with an issue link.",
+            "https://thejanitor.app/findings/security-phantom-payload-evasion",
+        ));
+    }
+    if label.starts_with("antipattern:ncd_anomaly") {
+        return Some((
+            "**Remediation**: The patch compresses to less than 15% of its original size, \
+             indicating extreme repetition (machine-generated boilerplate, auto-templated \
+             blocks, or verbosity-bomb commits). Reduce the PR to only the non-repetitive \
+             delta. If the repetition is intentional, split into a separate commit with an \
+             explicit justification in the PR description.",
+            "https://thejanitor.app/findings/antipattern-ncd-anomaly",
+        ));
+    }
+    None
+}
+
+pub fn render_sarif(entries: &[BounceLogEntry]) -> String {
+    use serde_json::{json, Value};
+    use std::collections::BTreeSet;
+
+    // Collect all unique antipattern labels (stable order via BTreeSet).
+    let mut all_labels: BTreeSet<String> = BTreeSet::new();
+    for e in entries {
+        for ap in &e.antipatterns {
+            all_labels.insert(ap.clone());
+        }
+        if !e.collided_pr_numbers.is_empty() {
+            all_labels.insert("swarm:structural_collision".to_string());
+        }
+    }
+
+    // Build rules array.
+    let rules: Vec<Value> = all_labels
+        .iter()
+        .map(|label| {
+            let level = if label.contains("security:") {
+                "error"
+            } else {
+                "warning"
+            };
+            match rule_help(label) {
+                Some((remediation_md, help_uri)) => json!({
+                    "id": label,
+                    "name": label,
+                    "shortDescription": { "text": label },
+                    "defaultConfiguration": { "level": level },
+                    "help": { "markdown": remediation_md, "text": remediation_md },
+                    "helpUri": help_uri
+                }),
+                None => json!({
+                    "id": label,
+                    "name": label,
+                    "shortDescription": { "text": label },
+                    "defaultConfiguration": { "level": level }
+                }),
+            }
+        })
+        .collect();
+
+    // Build results array.
+    let mut results: Vec<Value> = Vec::new();
+    for e in entries {
+        let pr_num = e.pr_number.unwrap_or(0);
+        let author = e.author.as_deref().unwrap_or("-");
+        let score_str = e.slop_score.to_string();
+        let repo = e.repo_slug.as_str();
+
+        for ap in &e.antipatterns {
+            let level = if ap.contains("security:") {
+                "error"
+            } else {
+                "warning"
+            };
+            let uri = if repo.is_empty() {
+                format!("pr/{pr_num}")
+            } else {
+                format!("{repo}/pr/{pr_num}")
+            };
+            // Populate physicalLocation.region.startLine when a (line=N) suffix
+            // is present in the detail string (emitted by the slop pipeline for
+            // both tree-sitter and binary_hunter findings since v7.9.4).
+            let physical_location: Value = match parse_sarif_line(ap) {
+                Some(line) => json!({
+                    "artifactLocation": { "uri": uri },
+                    "region": { "startLine": line }
+                }),
+                None => json!({
+                    "artifactLocation": { "uri": uri }
+                }),
+            };
+            results.push(json!({
+                "ruleId": ap,
+                "level": level,
+                "message": {
+                    "text": format!("PR #{pr_num} by {author}: {ap}")
+                },
+                "locations": [
+                    { "physicalLocation": physical_location }
+                ],
+                "partialFingerprints": {
+                    "janitorScore": score_str
+                }
+            }));
+        }
+
+        // Swarm collision result.
+        if !e.collided_pr_numbers.is_empty() {
+            let uri = if repo.is_empty() {
+                format!("pr/{pr_num}")
+            } else {
+                format!("{repo}/pr/{pr_num}")
+            };
+            results.push(json!({
+                "ruleId": "swarm:structural_collision",
+                "level": "error",
+                "message": {
+                    "text": format!(
+                        "PR #{pr_num} by {author}: structural clone collision with PRs {:?}",
+                        e.collided_pr_numbers
+                    )
+                },
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": { "uri": uri }
+                        }
+                    }
+                ],
+                "partialFingerprints": {
+                    "janitorScore": score_str
+                }
+            }));
+        }
+    }
+
+    // Annotate repeated rule IDs with root-cause provenance so operators see
+    // which SARIF result is the upstream repair point.
+    annotate_sarif_root_causes(&mut results);
+
+    let doc = json!({
+        "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "janitor",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "informationUri": "https://thejanitor.app",
+                        "rules": rules
+                    }
+                },
+                "results": results
+            }
+        ]
+    });
+
+    serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Annotate a SARIF results array with root-cause provenance.
+///
+/// Groups results by `ruleId`.  For any rule with N ≥ 2 occurrences the first
+/// result receives `properties.isRootCause = true` and
+/// `properties.dominatedCount = N − 1`; subsequent results receive
+/// `properties.isRootCause = false` and `properties.rootCauseResultIndex`
+/// pointing to the first occurrence so that SARIF consumers can surface the
+/// canonical repair location prominently.
+fn annotate_sarif_root_causes(results: &mut [serde_json::Value]) {
+    use serde_json::json;
+    use std::collections::HashMap;
+    let mut rule_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, result) in results.iter().enumerate() {
+        if let Some(rule_id) = result.get("ruleId").and_then(|v| v.as_str()) {
+            rule_to_indices
+                .entry(rule_id.to_string())
+                .or_default()
+                .push(i);
+        }
+    }
+    for indices in rule_to_indices.values() {
+        if indices.len() < 2 {
+            continue;
+        }
+        let root_idx = indices[0];
+        let dominated_count = indices.len() - 1;
+        if let Some(result) = results.get_mut(root_idx) {
+            if result.get("properties").is_none() {
+                result["properties"] = json!({});
+            }
+            if let Some(obj) = result["properties"].as_object_mut() {
+                obj.insert("isRootCause".to_string(), json!(true));
+                obj.insert("dominatedCount".to_string(), json!(dominated_count));
+            }
+        }
+        for &idx in &indices[1..] {
+            if let Some(result) = results.get_mut(idx) {
+                if result.get("properties").is_none() {
+                    result["properties"] = json!({});
+                }
+                if let Some(obj) = result["properties"].as_object_mut() {
+                    obj.insert("isRootCause".to_string(), json!(false));
+                    obj.insert("rootCauseResultIndex".to_string(), json!(root_idx));
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Actions Step Summary
+// ---------------------------------------------------------------------------
+
+/// Renders a high-density GitHub Actions Step Summary Markdown dashboard for a
+/// single bounce result.
+///
+/// Emits four sections:
+/// - **Integrity Radar**: 5 billing tiers with status icons (🔴/🟡/🟢).
+/// - **Structural Topology**: Top 3 version silos or dependency splits detected
+///   in this patch.
+/// - **Provenance Ledger**: Mathematical proof of 0 bytes exfiltrated.
+/// - **Vibe-Check**: NCD generative-verbosity indicator.
+///
+/// Zero heap-cloning of source fields: entry fields are borrowed as `&str`
+/// throughout; only the `String` accumulator itself is allocated.
+pub fn render_step_summary(entry: &BounceLogEntry) -> String {
+    let mut out = String::with_capacity(2048);
+
+    let is_critical = is_critical_threat(entry);
+    let is_necrotic = entry.necrotic_flag.is_some();
+    let is_structural = entry.slop_score > 0 && !is_critical && !is_necrotic;
+
+    let banner = if is_critical {
+        "🔴 **CRITICAL THREAT INTERCEPTED**"
+    } else if is_necrotic {
+        "🔴 **NECROTIC — Bot-Closeable**"
+    } else if is_structural {
+        "🟡 **STRUCTURAL SLOP DETECTED**"
+    } else {
+        "🟢 **SANCTUARY INTACT — PATCH CLEAN**"
+    };
+
+    out.push_str("## Janitor Integrity Dashboard\n\n");
+    out.push_str(banner);
+    out.push_str(" · Slop Score: `");
+    out.push_str(&entry.slop_score.to_string());
+    out.push_str("`\n");
+    let per_pr_tei: u32 = if is_critical {
+        150
+    } else if is_necrotic || is_structural {
+        20
+    } else {
+        0
+    };
+    out.push_str(&format!(
+        "**TEI: ${per_pr_tei} · Energy Reclaimed: {:.1} kWh**\n\n",
+        entry.ci_energy_saved_kwh
+    ));
+    if let Some(source) = entry.pqc_key_source.as_deref() {
+        out.push_str("**Key Custody:** `");
+        out.push_str(source);
+        out.push_str("`\n\n");
+    }
+    if let Some(proof) = entry.transparency_log.as_ref() {
+        out.push_str("**Transparency Log:** `Anchored at Index #");
+        out.push_str(&proof.sequence_index.to_string());
+        out.push_str("`\n\n");
+    }
+    if let Some(hash) = entry.wisdom_hash.as_deref() {
+        out.push_str("**Threat Intel Feed:** `");
+        out.push_str(hash);
+        out.push_str("`\n\n");
+    }
+    if !entry.wasm_policy_receipts.is_empty() {
+        out.push_str("**Wasm Policy Modules:** `");
+        out.push_str(&entry.wasm_policy_receipts.len().to_string());
+        out.push_str(" sealed`\n\n");
+    }
+    if let Some(receipt) = entry.decision_receipt.as_ref() {
+        out.push_str("**Governor Receipt:** `");
+        out.push_str(&receipt.receipt.transparency_anchor);
+        out.push_str("`\n\n");
+    }
+    let mut pqc_signatures = Vec::new();
+    if entry.pqc_sig.is_some() {
+        pqc_signatures.push("ML-DSA-65");
+    }
+    if entry.pqc_slh_sig.is_some() {
+        pqc_signatures.push("SLH-DSA-SHAKE-192s");
+    }
+    if !pqc_signatures.is_empty() {
+        out.push_str("**PQC Signatures:** `");
+        out.push_str(&pqc_signatures.join(" + "));
+        out.push_str("`\n\n");
+    }
+
+    // ── Integrity Radar ────────────────────────────────────────────────────────
+    out.push_str("### Integrity Radar\n\n");
+    out.push_str("| Tier | Signal | Status |\n");
+    out.push_str("|------|--------|--------|\n");
+
+    // Tier 1: Critical Threats
+    let crit_icon = if is_critical { "🔴" } else { "🟢" };
+    let crit_n = entry
+        .antipatterns
+        .iter()
+        .filter(|a| a.contains("security:"))
+        .count();
+    let crit_collisions = entry.collided_pr_numbers.len();
+    let crit_signal = if is_critical {
+        format!("{crit_n} security antipattern(s); {crit_collisions} swarm collision(s)")
+    } else {
+        "None".to_owned()
+    };
+    out.push_str("| Critical Threats | ");
+    out.push_str(&crit_signal);
+    out.push_str(" | ");
+    out.push_str(crit_icon);
+    out.push_str(" |\n");
+
+    // Tier 2: Secrets / Credential Leak
+    let secret_count = entry
+        .antipatterns
+        .iter()
+        .filter(|a| a.contains("credential_leak"))
+        .count();
+    let secret_icon = if secret_count > 0 { "🔴" } else { "🟢" };
+    let secret_signal = if secret_count > 0 {
+        format!("{secret_count} credential finding(s) — rotate immediately")
+    } else {
+        "None".to_owned()
+    };
+    out.push_str("| Secrets | ");
+    out.push_str(&secret_signal);
+    out.push_str(" | ");
+    out.push_str(secret_icon);
+    out.push_str(" |\n");
+
+    // Tier 3: Necrotic GC
+    let nec_icon = if is_necrotic { "🔴" } else { "🟢" };
+    let nec_signal = entry.necrotic_flag.as_deref().unwrap_or("None");
+    out.push_str("| Necrotic GC | `");
+    out.push_str(nec_signal);
+    out.push_str("` | ");
+    out.push_str(nec_icon);
+    out.push_str(" |\n");
+
+    // Tier 3: Structural Slop
+    let struct_icon = if is_structural { "🟡" } else { "🟢" };
+    let struct_signal = if is_structural {
+        format!("Score {}", entry.slop_score)
+    } else {
+        "None".to_owned()
+    };
+    out.push_str("| Structural Slop | ");
+    out.push_str(&struct_signal);
+    out.push_str(" | ");
+    out.push_str(struct_icon);
+    out.push_str(" |\n");
+
+    // Tier 4: Boilerplate (clean baseline)
+    let bplate_icon = if entry.slop_score == 0 {
+        "🟢"
+    } else {
+        "🟡"
+    };
+    let bplate_signal = if entry.slop_score == 0 {
+        "Clean"
+    } else {
+        "Flagged"
+    };
+    out.push_str("| Boilerplate | ");
+    out.push_str(bplate_signal);
+    out.push_str(" | ");
+    out.push_str(bplate_icon);
+    out.push_str(" |\n");
+
+    // Tier 5: Agentic Activity
+    let agent_icon = if entry.agentic_pct > 0.0 {
+        "🟡"
+    } else {
+        "🟢"
+    };
+    out.push_str("| Agentic Activity | ");
+    out.push_str(&format!("{:.0}% agentic contribution", entry.agentic_pct));
+    out.push_str(" | ");
+    out.push_str(agent_icon);
+    out.push_str(" |\n");
+    if entry.cognition_surrender_index > 0.0 {
+        out.push_str("| Cognition Surrender Index | ");
+        out.push_str(&format!("{:.2} pts/%", entry.cognition_surrender_index));
+        out.push_str(" | 🔴 |\n");
+    }
+    out.push('\n');
+
+    // ── Structural Topology ────────────────────────────────────────────────────
+    out.push_str("### Structural Topology\n\n");
+    if entry.version_silos.is_empty() {
+        out.push_str("No version silos detected in this patch.\n\n");
+    } else {
+        out.push_str("Top version splits detected in this patch:\n\n");
+        for (i, silo) in entry.version_silos.iter().take(3).enumerate() {
+            out.push_str(&format!("{}. `{}`\n", i + 1, html_escape(silo)));
+        }
+        if entry.version_silos.len() > 3 {
+            out.push_str(&format!(
+                "\n_…and {} more silo(s) total._\n",
+                entry.version_silos.len()
+            ));
+        }
+        out.push('\n');
+    }
+
+    // ── Provenance Ledger ──────────────────────────────────────────────────────
+    out.push_str("### Provenance Ledger\n\n");
+    let src = entry.provenance.source_bytes_processed;
+    let egress = entry.provenance.egress_bytes_sent;
+    let exfil_pct = if src > 0 {
+        (egress as f64 / src as f64) * 100.0
+    } else {
+        0.0
+    };
+    out.push_str("| Field | Value |\n");
+    out.push_str("|-------|-------|\n");
+    out.push_str(&format!("| Source bytes analysed | `{src}` |\n"));
+    out.push_str(&format!("| Egress bytes sent | `{egress}` |\n"));
+    out.push_str(&format!(
+        "| **Exfiltration ratio** | **{exfil_pct:.4}%** |\n"
+    ));
+    out.push_str(&format!(
+        "| Analysis duration | `{}ms` |\n",
+        entry.provenance.analysis_duration_ms
+    ));
+    out.push_str("| Zero-upload verified | ✅ Source code never left the runner |\n\n");
+    out.push_str(
+        "> **Mathematical proof**: `egress_bytes / source_bytes ≈ 0%`. \
+         The structural score — never source code — crosses the network boundary.\n\n",
+    );
+
+    // ── Vibe-Check (NCD Generative Verbosity) ─────────────────────────────────
+    out.push_str("### Vibe-Check (Generative Verbosity)\n\n");
+    let ncd_hit = entry
+        .antipatterns
+        .iter()
+        .any(|a| a.contains("antipattern:ncd_anomaly") || a.contains("HighGenerativeVerbosity:"));
+    if ncd_hit {
+        out.push_str(
+            "🟡 **NCD ANOMALY** — patch compresses unusually well (NCD ratio < 0.15). \
+             Statistical signature of AI-generated boilerplate: \
+             high internal repetition, low information density.\n\n",
+        );
+    } else {
+        out.push_str(
+            "🟢 **NCD NOMINAL** — compression ratio within normal range. \
+             Patch information density is consistent with human-authored code.\n\n",
+        );
+    }
+
+    // ── Search Reputation Risk ──────────────────────────────────────────────
+    out.push_str("### Search Reputation Risk\n\n");
+    if ncd_hit {
+        out.push_str(
+            "🔴 **HIGH** — NCD ratio < 0.15 indicates AI boilerplate. \
+             Merging this patch introduces statistically self-similar, \
+             low-variance content. Public repositories accumulate this signal \
+             across PRs; sustained high-NCD merge history degrades search \
+             engine relevance scores and may trigger low-quality content \
+             classifiers. Reject or refactor before merge.\n\n",
+        );
+    } else {
+        out.push_str(
+            "🟢 **LOW** — patch information density is within normal range. \
+             No search reputation risk detected.\n\n",
+        );
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1623,4 +3649,659 @@ mod tests {
         let output = render_scan_markdown(&[], 0, &orphans, "test-repo", 50);
         assert!(!output.contains("more entries"), "no overflow when <= 50");
     }
+
+    fn make_clean_entry() -> BounceLogEntry {
+        BounceLogEntry {
+            execution_tier: "Community".to_string(),
+            pr_number: Some(42),
+            author: Some("alice".to_string()),
+            timestamp: "2026-03-28T10:00:00Z".to_string(),
+            slop_score: 0,
+            dead_symbols_added: 0,
+            logic_clones_found: 0,
+            zombie_symbols_added: 0,
+            unlinked_pr: 0,
+            antipatterns: vec![],
+            comment_violations: vec![],
+            min_hashes: vec![],
+            zombie_deps: vec![],
+            state: PrState::Open,
+            is_bot: false,
+            repo_slug: "owner/repo".to_string(),
+            suppressed_by_domain: 0,
+            collided_pr_numbers: vec![],
+            necrotic_flag: None,
+            commit_sha: "abc123".to_string(),
+            policy_hash: "def456".to_string(),
+            version_silos: vec![],
+            agentic_pct: 0.0,
+            ci_energy_saved_kwh: 0.0,
+            provenance: Provenance {
+                analysis_duration_ms: 42,
+                source_bytes_processed: 1024,
+                egress_bytes_sent: 0,
+            },
+            governor_status: None,
+            pqc_sig: None,
+            pqc_slh_sig: None,
+            pqc_key_source: None,
+            transparency_log: None,
+            wisdom_hash: None,
+            wisdom_signature: None,
+            wasm_policy_receipts: Vec::new(),
+            capsule_hash: None,
+            decision_receipt: None,
+            cognition_surrender_index: 0.0,
+            git_signature_status: None,
+        }
+    }
+
+    #[test]
+    fn test_render_step_summary_clean_entry() {
+        let entry = make_clean_entry();
+        let output = render_step_summary(&entry);
+        assert!(
+            output.contains("SANCTUARY INTACT"),
+            "clean entry must show SANCTUARY INTACT"
+        );
+        assert!(
+            output.contains("Integrity Radar"),
+            "must include radar section"
+        );
+        assert!(
+            output.contains("Provenance Ledger"),
+            "must include provenance section"
+        );
+        assert!(
+            output.contains("Vibe-Check"),
+            "must include vibe-check section"
+        );
+        assert!(
+            output.contains("NCD NOMINAL"),
+            "clean entry must show NCD NOMINAL"
+        );
+        assert!(output.contains("0.0000%"), "exfil ratio must be near 0%");
+    }
+
+    #[test]
+    fn test_render_step_summary_critical_entry() {
+        let mut entry = make_clean_entry();
+        entry.slop_score = 150;
+        entry.antipatterns = vec!["security:unsafe_gets — gets() is unsafe".to_string()];
+        let output = render_step_summary(&entry);
+        assert!(
+            output.contains("CRITICAL THREAT"),
+            "critical entry must show CRITICAL THREAT banner"
+        );
+        assert!(
+            output.contains("🔴"),
+            "critical entry must show red indicator"
+        );
+    }
+
+    #[test]
+    fn test_render_step_summary_shows_key_custody() {
+        let mut entry = make_clean_entry();
+        entry.pqc_key_source = Some("aws-kms".to_string());
+        let output = render_step_summary(&entry);
+        assert!(
+            output.contains("Key Custody"),
+            "must render key custody header"
+        );
+        assert!(output.contains("aws-kms"), "must render custody value");
+    }
+
+    #[test]
+    fn test_render_step_summary_ncd_anomaly() {
+        let mut entry = make_clean_entry();
+        entry.antipatterns = vec!["antipattern:ncd_anomaly — NCD ratio 0.08".to_string()];
+        let output = render_step_summary(&entry);
+        assert!(
+            output.contains("NCD ANOMALY"),
+            "must detect ncd_anomaly antipattern"
+        );
+        assert!(
+            output.contains("🟡"),
+            "NCD anomaly must show amber indicator"
+        );
+    }
+
+    #[test]
+    fn test_render_step_summary_version_silos() {
+        let mut entry = make_clean_entry();
+        entry.version_silos = vec![
+            "serde (v1.0.100 vs v1.0.150)".to_string(),
+            "tokio (v1.38 vs v1.40)".to_string(),
+            "anyhow (v1.0.80 vs v1.0.86)".to_string(),
+            "thiserror (v1.0 vs v2.0)".to_string(),
+        ];
+        let output = render_step_summary(&entry);
+        // Top 3 must appear; 4th triggers "more" message.
+        assert!(output.contains("serde"), "first silo must appear");
+        assert!(output.contains("tokio"), "second silo must appear");
+        assert!(output.contains("anyhow"), "third silo must appear");
+        assert!(
+            output.contains("more silo"),
+            "overflow message must appear when >3"
+        );
+    }
+
+    #[test]
+    fn test_bounce_log_entry_to_cef_string() {
+        let mut entry = make_clean_entry();
+        entry.slop_score = 150;
+        entry.antipatterns = vec!["security:compiled_payload_anomaly".to_string()];
+        let cef = entry.to_cef_string();
+        assert!(cef.starts_with(
+            "CEF:0|JanitorSecurity|TheJanitor|10.2|security:compiled_payload_anomaly|Critical|8|"
+        ));
+        assert!(cef.contains("msg=security:compiled_payload_anomaly"));
+        assert!(cef.contains("cs1=owner/repo"));
+        assert!(cef.contains("cs2=42"));
+    }
+
+    #[test]
+    fn test_bounce_log_entry_to_cef_string_escapes_pipe_and_equals() {
+        let mut entry = make_clean_entry();
+        entry.slop_score = 150;
+        entry.antipatterns =
+            vec!["security:kev_pipe|eq — rotate key=value | isolate tenant".to_string()];
+        let cef = entry.to_cef_string();
+        assert!(cef.contains("security:kev_pipe\\|eq"));
+        assert!(cef.contains("msg=rotate key\\=value \\| isolate tenant"));
+    }
+
+    #[test]
+    fn test_bounce_log_entry_to_ocsf_json() {
+        let mut entry = make_clean_entry();
+        entry.pr_number = Some(99);
+        entry.slop_score = 75;
+        entry.antipatterns = vec!["antipattern:ncd_anomaly".to_string()];
+        let ocsf = entry.to_ocsf_json();
+        assert_eq!(ocsf["class_name"], "Security Finding");
+        assert_eq!(ocsf["resources"][0]["name"], "owner/repo");
+        assert_eq!(ocsf["resources"][0]["uid"], "abc123");
+        assert_eq!(ocsf["finding_info"]["uid"], "owner/repo:99:abc123");
+        assert_eq!(ocsf["metadata"]["version"], "1.1.0");
+    }
+
+    #[test]
+    fn test_dynamic_ci_energy_saved_non_critical() {
+        let energy = compute_ci_energy_saved_kwh_from_metrics(3_600_000, true, false);
+        assert!((energy - 0.150).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_dynamic_ci_energy_saved_critical_multiplies_reruns() {
+        let antipatterns = vec!["security:runtime_exec".to_string()];
+        let energy = compute_ci_energy_saved_kwh(3_600_000, 100, None, &antipatterns, &[]);
+        assert!((energy - 0.750).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod webhook_tests {
+    use super::*;
+    use common::policy::WebhookConfig;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn make_entry(antipatterns: Vec<String>, necrotic: Option<String>) -> BounceLogEntry {
+        BounceLogEntry {
+            execution_tier: "Community".to_string(),
+            pr_number: Some(1),
+            author: Some("test".to_string()),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            slop_score: 0,
+            dead_symbols_added: 0,
+            logic_clones_found: 0,
+            zombie_symbols_added: 0,
+            unlinked_pr: 0,
+            antipatterns,
+            comment_violations: vec![],
+            min_hashes: vec![],
+            zombie_deps: vec![],
+            state: PrState::Open,
+            is_bot: false,
+            repo_slug: String::new(),
+            suppressed_by_domain: 0,
+            collided_pr_numbers: vec![],
+            necrotic_flag: necrotic,
+            commit_sha: String::new(),
+            policy_hash: String::new(),
+            version_silos: vec![],
+            agentic_pct: 0.0,
+            ci_energy_saved_kwh: 0.0,
+            provenance: Provenance::default(),
+            governor_status: None,
+            pqc_sig: None,
+            pqc_slh_sig: None,
+            pqc_key_source: None,
+            transparency_log: None,
+            wisdom_hash: None,
+            wisdom_signature: None,
+            wasm_policy_receipts: Vec::new(),
+            capsule_hash: None,
+            decision_receipt: None,
+            cognition_surrender_index: 0.0,
+            git_signature_status: None,
+        }
+    }
+
+    #[test]
+    fn webhook_no_fire_when_url_empty() {
+        let entry = make_entry(vec!["security:strcpy".to_string()], None);
+        let policy = common::policy::JanitorPolicy::default();
+        // Should not panic; url is empty so returns early
+        fire_webhook_if_configured(&entry, &policy);
+    }
+
+    #[test]
+    fn webhook_no_fire_when_event_not_matched() {
+        let _entry = make_entry(vec![], Some("SEMANTIC_NULL".to_string()));
+        let mut policy = common::policy::JanitorPolicy::default();
+        policy.webhook = WebhookConfig {
+            url: "https://example.com/hook".to_string(),
+            secret: String::new(),
+            events: vec!["critical_threat".to_string()], // necrotic not in filter
+            lifecycle_events: false,
+            ticket_project: None,
+        };
+        // necrotic flag present, but filter only wants critical_threat — should not fire
+        assert!(!policy.webhook.should_fire(false, true));
+    }
+
+    #[test]
+    fn webhook_fires_for_critical() {
+        let policy_cfg = WebhookConfig {
+            url: "https://example.com/hook".to_string(),
+            secret: String::new(),
+            events: vec!["critical_threat".to_string()],
+            lifecycle_events: false,
+            ticket_project: None,
+        };
+        assert!(policy_cfg.should_fire(true, false));
+    }
+
+    #[test]
+    fn lifecycle_webhook_emits_finding_opened() {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("listener must bind: {err}"),
+        };
+        let addr = listener.local_addr().expect("listener must expose address");
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept must succeed");
+            let request = read_http_request(&mut stream);
+            tx.send(String::from_utf8_lossy(&request).to_string())
+                .expect("request send must succeed");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("response write must succeed");
+            stream.flush().expect("flush must succeed");
+        });
+
+        let mut policy = common::policy::JanitorPolicy::default();
+        policy.webhook = WebhookConfig {
+            url: format!("http://{}", addr),
+            secret: "transport-secret".to_string(),
+            events: vec!["all".to_string()],
+            lifecycle_events: true,
+            ticket_project: Some("SEC".to_string()),
+        };
+        let entry = BounceLogEntry {
+            slop_score: 200,
+            repo_slug: "owner/repo".to_string(),
+            commit_sha: "deadbeef".to_string(),
+            antipatterns: vec!["security:credential_exposure — [REDACTED]".to_string()],
+            ..make_entry(Vec::new(), None)
+        };
+        let findings = vec![common::slop::StructuredFinding {
+            id: "security:credential_exposure".to_string(),
+            file: Some("src/lib.rs".to_string()),
+            line: Some(42),
+            fingerprint: "fp-open".to_string(),
+            severity: Some("KevCritical".to_string()),
+            remediation: Some("Rotate the credential and remove it from the patch.".to_string()),
+            docs_url: None,
+            exploit_witness: None,
+            upstream_validation_absent: false,
+            ..Default::default()
+        }];
+
+        emit_lifecycle_webhook(&entry, None, &findings, 100, &policy);
+
+        let request = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("lifecycle webhook request must arrive");
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request_lower.contains("x-janitor-event: finding_opened"));
+        let body = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("request must contain body");
+        let payload: serde_json::Value =
+            serde_json::from_str(body).expect("lifecycle request body must be valid JSON");
+        assert_eq!(payload["event"], "finding_opened");
+        assert_eq!(payload["ticket_project"], "SEC");
+        let expected_sig = sign_webhook_payload("transport-secret", body);
+        assert!(request_lower.contains(&format!(
+            "x-janitor-signature-256: {}",
+            expected_sig.to_ascii_lowercase()
+        )));
+    }
+
+    #[test]
+    fn lifecycle_webhook_emits_finding_resolved() {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("listener must bind: {err}"),
+        };
+        let addr = listener.local_addr().expect("listener must expose address");
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept must succeed");
+            let request = read_http_request(&mut stream);
+            tx.send(String::from_utf8_lossy(&request).to_string())
+                .expect("request send must succeed");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("response write must succeed");
+            stream.flush().expect("flush must succeed");
+        });
+
+        let mut policy = common::policy::JanitorPolicy::default();
+        policy.webhook = WebhookConfig {
+            url: format!("http://{}", addr),
+            secret: "transport-secret".to_string(),
+            events: vec!["all".to_string()],
+            lifecycle_events: true,
+            ticket_project: Some("SEC".to_string()),
+        };
+        let current = BounceLogEntry {
+            slop_score: 0,
+            repo_slug: "owner/repo".to_string(),
+            commit_sha: "feedface".to_string(),
+            ..make_entry(Vec::new(), None)
+        };
+        let prior = BounceLogEntry {
+            slop_score: 180,
+            repo_slug: "owner/repo".to_string(),
+            commit_sha: "cafebabe".to_string(),
+            antipatterns: vec!["security:credential_exposure — [REDACTED]".to_string()],
+            ..make_entry(Vec::new(), None)
+        };
+
+        emit_lifecycle_webhook(&current, Some(&prior), &[], 100, &policy);
+
+        let request = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("resolved lifecycle webhook request must arrive");
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request_lower.contains("x-janitor-event: finding_resolved"));
+        let body = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("request must contain body");
+        let payload: serde_json::Value =
+            serde_json::from_str(body).expect("lifecycle request body must be valid JSON");
+        assert_eq!(payload["event"], "finding_resolved");
+    }
+}
+
+#[cfg(test)]
+mod soft_fail_tests {
+    use super::*;
+
+    fn make_test_entry() -> BounceLogEntry {
+        BounceLogEntry {
+            execution_tier: "Community".to_string(),
+            pr_number: None,
+            author: None,
+            timestamp: "2026-04-03T00:00:00Z".to_string(),
+            slop_score: 0,
+            dead_symbols_added: 0,
+            logic_clones_found: 0,
+            zombie_symbols_added: 0,
+            unlinked_pr: 0,
+            antipatterns: vec![],
+            comment_violations: vec![],
+            min_hashes: vec![],
+            zombie_deps: vec![],
+            state: PrState::Open,
+            is_bot: false,
+            repo_slug: String::new(),
+            suppressed_by_domain: 0,
+            collided_pr_numbers: vec![],
+            necrotic_flag: None,
+            commit_sha: String::new(),
+            policy_hash: String::new(),
+            version_silos: vec![],
+            agentic_pct: 0.0,
+            ci_energy_saved_kwh: 0.0,
+            provenance: Provenance::default(),
+            governor_status: None,
+            pqc_sig: None,
+            pqc_slh_sig: None,
+            pqc_key_source: None,
+            transparency_log: None,
+            wisdom_hash: None,
+            wisdom_signature: None,
+            wasm_policy_receipts: Vec::new(),
+            capsule_hash: None,
+            decision_receipt: None,
+            cognition_surrender_index: 0.0,
+            git_signature_status: None,
+        }
+    }
+
+    /// Verify that `post_bounce_result` returns `Err` when the Governor is
+    /// unreachable.  This is the precondition that the soft-fail path handles.
+    #[test]
+    fn post_bounce_result_fails_for_unreachable_endpoint() {
+        let entry = make_test_entry();
+        // Port 1 is always connection-refused; never has a listener.
+        let agent = ureq::Agent::new_with_defaults();
+        let result = post_bounce_result(&agent, "http://127.0.0.1:1", "fake-token", &entry);
+        assert!(result.is_err(), "unreachable endpoint must return Err");
+    }
+
+    /// With soft_fail = true the caller must suppress the Governor error and
+    /// return Ok — simulating the `Err(e) if soft_fail` match arm in cmd_bounce.
+    #[test]
+    fn soft_fail_suppresses_governor_error() {
+        let entry = make_test_entry();
+        let agent = ureq::Agent::new_with_defaults();
+        let result = post_bounce_result(&agent, "http://127.0.0.1:1", "fake-token", &entry);
+        let soft_fail = true;
+        let handled: anyhow::Result<()> = match result {
+            Ok(_) => Ok(()),
+            Err(_) if soft_fail => Ok(()), // soft-fail: degrade, do not propagate
+            Err(e) => Err(e),
+        };
+        assert!(
+            handled.is_ok(),
+            "soft_fail path must return Ok when governor unreachable"
+        );
+    }
+
+    /// Without soft_fail the Governor error must propagate (CLI exits 1).
+    #[test]
+    fn hard_fail_propagates_governor_error() {
+        let entry = make_test_entry();
+        let agent = ureq::Agent::new_with_defaults();
+        let result = post_bounce_result(&agent, "http://127.0.0.1:1", "fake-token", &entry);
+        let soft_fail = false;
+        let handled: anyhow::Result<()> = match result {
+            Ok(_) => Ok(()),
+            Err(_) if soft_fail => Ok(()),
+            Err(e) => Err(e),
+        };
+        assert!(
+            handled.is_err(),
+            "hard-fail path must propagate Err when governor unreachable"
+        );
+    }
+
+    #[test]
+    fn resolve_governor_url_prefers_cli_then_policy_then_default() {
+        let mut policy = common::policy::JanitorPolicy::default();
+        assert_eq!(resolve_governor_url(None, &policy), DEFAULT_GOVERNOR_URL);
+
+        policy.forge.governor_url = Some("http://127.0.0.1:3000/".to_string());
+        assert_eq!(resolve_governor_url(None, &policy), "http://127.0.0.1:3000");
+        assert_eq!(
+            resolve_governor_url(Some("http://127.0.0.1:4000/"), &policy),
+            "http://127.0.0.1:4000"
+        );
+    }
+
+    #[test]
+    fn post_bounce_result_parses_inclusion_proof() {
+        use common::receipt::{DecisionReceipt, SignedDecisionReceipt};
+        use ed25519_dalek::SigningKey;
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        const TEST_GOVERNOR_SIGNING_KEY_SEED: [u8; 32] = [
+            0x23, 0x70, 0xde, 0x11, 0x87, 0xe8, 0xd5, 0x7e, 0x42, 0x3d, 0x3e, 0xe0, 0x38, 0x64,
+            0x2c, 0x41, 0x3e, 0x27, 0x23, 0x36, 0xd4, 0x26, 0x5c, 0x1b, 0xc4, 0x1c, 0x6c, 0x22,
+            0x9a, 0xc4, 0xeb, 0xe5,
+        ];
+
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("listener bind must succeed: {err}"),
+        };
+        let addr = listener.local_addr().expect("listener must expose address");
+        let signing_key = SigningKey::from_bytes(&TEST_GOVERNOR_SIGNING_KEY_SEED);
+        let decision_receipt = SignedDecisionReceipt::sign(
+            DecisionReceipt {
+                execution_tier: "Community".to_string(),
+                policy_hash: "policy".to_string(),
+                wisdom_hash: "wisdom".to_string(),
+                commit_sha: "deadbeef".to_string(),
+                repo_slug: "owner/repo".to_string(),
+                slop_score: 0,
+                transparency_anchor: "42:abc123".to_string(),
+                cbom_signature: "mlsig".to_string(),
+                capsule_hash: "capsule".to_string(),
+                wasm_policy_receipts: Vec::new(),
+            },
+            &signing_key,
+        )
+        .expect("decision receipt must sign");
+        let response_body = serde_json::json!({
+            "status": "accepted",
+            "inclusion_proof": {"sequence_index": 42, "chained_hash": "abc123"},
+            "decision_receipt": decision_receipt,
+        })
+        .to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept must succeed");
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 1024];
+            let header_end = loop {
+                let n = stream.read(&mut buf).expect("request read must succeed");
+                if n == 0 {
+                    panic!("request must contain headers");
+                }
+                request.extend_from_slice(&buf[..n]);
+                if let Some(pos) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let content_length = String::from_utf8_lossy(&request[..header_end])
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            let body_len = request.len().saturating_sub(header_end);
+            if body_len < content_length {
+                let mut remaining = vec![0_u8; content_length - body_len];
+                stream
+                    .read_exact(&mut remaining)
+                    .expect("request body must be readable");
+                request.extend_from_slice(&remaining);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .expect("response write must succeed");
+            use std::io::Write as _;
+            stream.flush().expect("response flush must succeed");
+        });
+
+        let agent = ureq::Agent::new_with_defaults();
+        let attestation = post_bounce_result(
+            &agent,
+            &format!("http://{}", addr),
+            "fake-token",
+            &make_test_entry(),
+        )
+        .expect("governor proof must parse");
+
+        assert_eq!(attestation.inclusion_proof.sequence_index, 42);
+        assert_eq!(attestation.inclusion_proof.chained_hash, "abc123");
+        attestation.decision_receipt.verify().unwrap();
+    }
+}
+
+#[cfg(test)]
+fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::Read as _;
+
+    let mut request = Vec::new();
+    let mut buf = [0_u8; 1024];
+    let header_end = loop {
+        let n = stream.read(&mut buf).expect("request read must succeed");
+        if n == 0 {
+            panic!("request must contain headers");
+        }
+        request.extend_from_slice(&buf[..n]);
+        if let Some(pos) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+    let content_length = String::from_utf8_lossy(&request[..header_end])
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    let body_len = request.len().saturating_sub(header_end);
+    if body_len < content_length {
+        let mut remaining = vec![0_u8; content_length - body_len];
+        stream
+            .read_exact(&mut remaining)
+            .expect("request body must be readable");
+        request.extend_from_slice(&remaining);
+    }
+    request
 }

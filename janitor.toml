@@ -1,34 +1,22 @@
-# The Janitor Governance Manifest
-# Loaded automatically by `janitor bounce` and `janitor scan`.
-# See: https://thejanitor.app/governance (coming soon)
-#
-# All fields are optional. Defaults match the built-in engine constants.
-# Unknown fields produce a warning and fall back to defaults.
+min_slop_score = 10
 
-# Composite slop-score threshold above which the PR gate fires.
-# Default: 20. Raise for high-velocity repos; lower for safety-critical code.
-min_slop_score = 20
-
-# When true, any PR without a linked GitHub issue fails the gate unconditionally.
-# Default: false.
-require_issue_link = false
-
-# When true, zombie-symbol re-introductions (verbatim body match to a previously
-# deleted dead symbol) do not contribute to the score. Enable only during
-# intentional symbol resurrection passes.
-# Default: true.
-allowed_zombies = true
-
-# Reserved: post-quantum cryptography enforcement (not yet implemented).
-# Default: false.
-pqc_enforced = false
-
-# Paths (relative to repo root) to custom .scm tree-sitter query files that
-# define project-specific antipatterns. Each @slop capture = +50 to slop score.
-# Default: [] (no custom queries).
-custom_antipatterns = []
-
-# Score reduction applied when a PR body contains [REFACTOR] or [FIXES-DEBT].
-# The effective gate is raised by this amount for marked PRs only.
-# Default: 0 (no Refactor Bonus).
-refactor_bonus = 0
+[forge]
+# Sprint 169-170 oracle and detector files contain intentionally repetitive
+# boolean-predicate functions (is_exploitable, is_reachable, is_critical, etc.)
+# that are structurally identical after alpha-normalization.  Each predicate
+# corresponds to one proof obligation and must follow the same boolean-conjunction
+# contract for Kani formal verification and oracle evaluation consistency.
+# These are deliberate by design — not accidental copy-paste.
+clone_exempt_paths = [
+  "crates/cli/src/registry_watch_cmd.rs",
+  "crates/forge/src/binary_diff.rs",
+  "crates/forge/src/callgraph.rs",
+  "crates/forge/src/compliance_oracle.rs",
+  "crates/forge/src/medical.rs",
+  "crates/forge/src/proof_obligation.rs",
+  "crates/forge/src/registry_probe.rs",
+  "crates/forge/src/registry_watch/crates_io.rs",
+  "crates/forge/src/registry_watch/queue.rs",
+  "crates/forge/src/registry_watch/score.rs",
+  "crates/forge/src/threat_model_oracle.rs",
+]

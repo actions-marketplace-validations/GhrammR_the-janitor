@@ -1,0 +1,124 @@
+name: registry-watch
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+permissions: read-all
+jobs:
+  registry-watch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      security-events: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install Janitor Binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="$(gh release view --repo janitor-security/the-janitor --json tagName -q .tagName)"
+          mkdir -p /tmp/janitor-bin
+          gh release download "${TAG}" \
+            --repo janitor-security/the-janitor \
+            --pattern "janitor" \
+            --pattern "janitor.sha384" \
+            --dir /tmp/janitor-bin \
+            --clobber
+          printf '%s  %s\n' "$(tr -d '\n' < /tmp/janitor-bin/janitor.sha384)" "/tmp/janitor-bin/janitor" | sha384sum -c -
+          chmod +x /tmp/janitor-bin/janitor
+          echo "/tmp/janitor-bin" >> "$GITHUB_PATH"
+
+      - name: Run registry watch scan
+        id: scan
+        run: |
+          set -euo pipefail
+          # Correct subcommand: watch-registries (not registry-watch).
+          # --once: single poll cycle, no daemon loop.
+          # --dry-run: print findings as NDJSON to stdout; do NOT write queue file.
+          # Report files written to $GITHUB_WORKSPACE so hashFiles() and
+          # upload-artifact can resolve them (hashFiles requires workspace-relative paths).
+          REPORT="${GITHUB_WORKSPACE}/rw_report.json"
+          SARIF="${GITHUB_WORKSPACE}/rw_report.sarif"
+          SCAN_LOG="${GITHUB_WORKSPACE}/rw_scan.log"
+          janitor watch-registries --once --dry-run --max-age-hours 24 \
+            > "${REPORT}" 2>"${SCAN_LOG}" || {
+            echo "::warning::watch-registries exited non-zero — not a findings signal; see rw_scan.log artifact"
+            echo "findings=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ -s "${REPORT}" ]; then
+            echo "findings=true" >> "$GITHUB_OUTPUT"
+            # Generate minimal SARIF from NDJSON for Security tab integration.
+            jq -n --slurpfile pkgs "${REPORT}" '{
+              "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+              version: "2.1.0",
+              runs: [{
+                tool: { driver: { name: "janitor-registry-watch", version: "1.0", rules: [] } },
+                results: [ $pkgs[] | {
+                  ruleId: "registry-watch/suspicious-package",
+                  level: "warning",
+                  message: { text: ("Suspicious package: " + .name + " v" + .version + " (" + .registry + ")") },
+                  locations: [{ physicalLocation: { artifactLocation: { uri: "registry-feed" } } }]
+                }]
+              }]
+            }' > "${SARIF}"
+          else
+            echo "findings=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload SARIF to Security tab
+        if: always() && hashFiles('rw_report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@7d9249f5a57288b8a472ddd9cc3ece1921f7dc38 # v3
+        with:
+          sarif_file: rw_report.sarif
+
+      - name: Upload report artifact
+        if: always() && hashFiles('rw_report.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rw-report-${{ github.run_id }}
+          path: rw_report.json
+          retention-days: 30
+
+      - name: File issue on detection
+        if: steps.scan.outputs.findings == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            // Law W-CLI-IX: deduplicate — skip if an open triage issue already exists.
+            // Daily runs produce findings every day; without this gate a new issue is
+            // filed unconditionally even when yesterday's alerts are already dismissed.
+            const TRIAGE_TITLE = 'Registry Watch: suspicious package detected';
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 20,
+            }).catch(() => ({ data: [] }));
+            const alreadyOpen = existing.data.some(i => i.title === TRIAGE_TITLE);
+            if (alreadyOpen) {
+              core.info('Open triage issue already exists — skipping duplicate creation (Law W-CLI-IX).');
+              return;
+            }
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: TRIAGE_TITLE,
+              body: [
+                '## Registry Watch Alert',
+                '',
+                `Automated registry scan on run [${context.runId}](${runUrl}) detected suspicious packages.`,
+                '',
+                '**Artifacts:** Download `rw-report-' + context.runId + '` from the run artifacts above for the full NDJSON report.',
+                '',
+                '**SARIF findings** are visible in the [Security → Code scanning](../../security/code-scanning) tab.',
+                '',
+                'Triage: review the artifact, verify each package is a true positive, then close this issue with a resolution comment.'
+              ].join('\n')
+            })

@@ -9,7 +9,7 @@
 //! 2. **Base detection**: resolve `refs/remotes/origin/master` or `.../main`.
 //! 3. **Rayon matrix**: `.par_iter()` over collected PR refs.  Each rayon
 //!    task opens its own `git2::Repository` (not `Send`) and calls the
-//!    existing [`bounce_git`][forge::slop_filter::bounce_git] engine.
+//!    existing [`forge::slop_filter::bounce_git`] engine.
 //! 4. **Log flush**: collect results in memory, write sequentially to
 //!    `.janitor/bounce_log.ndjson`.
 //!
@@ -35,9 +35,33 @@ use std::time::Instant;
 use anyhow::{anyhow, Result};
 use git2::{Oid, Repository};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use anatomist::parser::ParserHost;
 use common::physarum::{Pulse, SystemHeart};
+
+// ---------------------------------------------------------------------------
+// Base-lockfile ODB fetch
+// ---------------------------------------------------------------------------
+
+/// Read the raw bytes of `Cargo.lock` at `base_sha` from the repository ODB.
+///
+/// Used to provide the base snapshot for silo delta computation:
+/// [`anatomist::manifest::find_version_silos_from_lockfile`] subtracts any
+/// crate that was already a version-split on the base branch so that only
+/// silos **introduced** by the PR are reported.
+///
+/// Returns `None` on any failure (missing file, invalid OID, git error) — the
+/// caller falls back to reporting all head silos without delta filtering.
+fn fetch_base_lockfile(repo_path: &Path, base_sha: &str) -> Option<Vec<u8>> {
+    let repo = git2::Repository::open(repo_path).ok()?;
+    let oid = git2::Oid::from_str(base_sha).ok()?;
+    let commit = repo.find_commit(oid).ok()?;
+    let tree = commit.tree().ok()?;
+    let entry = tree.get_path(std::path::Path::new("Cargo.lock")).ok()?;
+    let blob = repo.find_blob(entry.id()).ok()?;
+    Some(blob.content().to_vec())
+}
 use common::registry::{symbol_hash, MappedRegistry, SymbolEntry, SymbolRegistry};
 use common::Protection;
 use forge::slop_filter::bounce_git;
@@ -45,6 +69,139 @@ use include_deflator::graph::IncludeGraphBuilder;
 
 use crate::report::{BounceLogEntry, PrState};
 use crate::utc_now_iso8601;
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct StrikeCheckpoint {
+    run_id: String,
+    #[serde(default)]
+    processed_pr_numbers: Vec<u32>,
+    #[serde(default)]
+    processed_commit_shas: Vec<String>,
+}
+
+struct StrikeCheckpointState {
+    doc: StrikeCheckpoint,
+    path: PathBuf,
+    processed_pr_numbers: HashSet<u32>,
+    processed_commit_shas: HashSet<String>,
+}
+
+impl StrikeCheckpointState {
+    fn load(janitor_dir: &Path, run_id: &str) -> Self {
+        let path = strike_checkpoint_path(janitor_dir, run_id);
+        let mut doc = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<StrikeCheckpoint>(&raw).ok())
+            .unwrap_or_else(|| StrikeCheckpoint {
+                run_id: run_id.to_string(),
+                ..StrikeCheckpoint::default()
+            });
+        if doc.run_id.is_empty() {
+            doc.run_id = run_id.to_string();
+        }
+
+        if doc.processed_pr_numbers.is_empty() {
+            doc.processed_pr_numbers = load_processed_pr_numbers(janitor_dir).into_iter().collect();
+            doc.processed_pr_numbers.sort_unstable();
+        }
+
+        let processed_pr_numbers = doc.processed_pr_numbers.iter().copied().collect();
+        let processed_commit_shas = doc.processed_commit_shas.iter().cloned().collect();
+        Self {
+            doc,
+            path,
+            processed_pr_numbers,
+            processed_commit_shas,
+        }
+    }
+
+    fn fresh(janitor_dir: &Path, run_id: &str) -> Self {
+        let path = strike_checkpoint_path(janitor_dir, run_id);
+        let _ = std::fs::remove_file(&path);
+        Self {
+            doc: StrikeCheckpoint {
+                run_id: run_id.to_string(),
+                ..StrikeCheckpoint::default()
+            },
+            path,
+            processed_pr_numbers: HashSet::new(),
+            processed_commit_shas: HashSet::new(),
+        }
+    }
+
+    fn contains(&self, pr_num: u32, pr_sha: &str) -> bool {
+        self.processed_pr_numbers.contains(&pr_num) || self.processed_commit_shas.contains(pr_sha)
+    }
+
+    fn mark_processed(&mut self, pr_num: u32, pr_sha: &str) {
+        if self.processed_pr_numbers.insert(pr_num) {
+            self.doc.processed_pr_numbers.push(pr_num);
+            self.doc.processed_pr_numbers.sort_unstable();
+        }
+        if self.processed_commit_shas.insert(pr_sha.to_string()) {
+            self.doc.processed_commit_shas.push(pr_sha.to_string());
+            self.doc.processed_commit_shas.sort();
+        }
+    }
+
+    fn persist_atomically(&self) -> Result<()> {
+        let checkpoint_dir = self
+            .path
+            .parent()
+            .ok_or_else(|| anyhow!("strike checkpoint has no parent directory"))?;
+        std::fs::create_dir_all(checkpoint_dir).map_err(|e| {
+            anyhow!(
+                "Cannot create strike checkpoint directory {}: {e}",
+                checkpoint_dir.display()
+            )
+        })?;
+        let tmp_path = self.path.with_extension("json.tmp");
+        let payload = serde_json::to_vec_pretty(&self.doc)
+            .map_err(|_| anyhow!("strike checkpoint serialization failed"))?;
+        std::fs::write(&tmp_path, payload).map_err(|e| {
+            anyhow!(
+                "Cannot write strike checkpoint temp file {}: {e}",
+                tmp_path.display()
+            )
+        })?;
+        std::fs::rename(&tmp_path, &self.path).map_err(|e| {
+            anyhow!(
+                "Cannot atomically publish strike checkpoint {}: {e}",
+                self.path.display()
+            )
+        })?;
+        Ok(())
+    }
+}
+
+struct StrikeRecorder {
+    checkpoint: StrikeCheckpointState,
+    writer: BufWriter<std::fs::File>,
+}
+
+impl StrikeRecorder {
+    fn new(writer: BufWriter<std::fs::File>, checkpoint: StrikeCheckpointState) -> Self {
+        Self { checkpoint, writer }
+    }
+
+    fn record_success(&mut self, pr_num: u32, pr_sha: &str, entry: &BounceLogEntry) -> Result<()> {
+        let line = serde_json::to_string(entry)
+            .map_err(|_| anyhow!("hyper-drive result serialization failed"))?;
+        writeln!(self.writer, "{line}")
+            .map_err(|e| anyhow!("hyper-drive log write failed: {e}"))?;
+        self.writer
+            .flush()
+            .map_err(|e| anyhow!("hyper-drive log flush failed: {e}"))?;
+        self.checkpoint.mark_processed(pr_num, pr_sha);
+        self.checkpoint.persist_atomically()
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.writer
+            .flush()
+            .map_err(|e| anyhow!("hyper-drive log flush failed: {e}"))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -69,6 +226,12 @@ pub fn cmd_hyper_drive(
     resume: bool,
 ) -> Result<()> {
     let t0 = Instant::now();
+    let slug = repo_slug.map(str::to_owned).unwrap_or_else(|| {
+        repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
 
     // ── Step 1: collect PR refs ───────────────────────────────────────────
     let mut pr_entries = collect_pr_refs(repo_path, limit)?;
@@ -101,21 +264,33 @@ pub fn cmd_hyper_drive(
     std::fs::create_dir_all(&janitor_dir)
         .map_err(|e| anyhow!("Cannot create .janitor dir: {e}"))?;
 
+    let run_id = strike_run_id(&slug, &base_sha, limit);
+    let checkpoint = if resume {
+        StrikeCheckpointState::load(&janitor_dir, &run_id)
+    } else {
+        StrikeCheckpointState::fresh(&janitor_dir, &run_id)
+    };
+
     // ── Step 2.55: Resume filter ──────────────────────────────────────────
-    // When --resume is active, skip PRs already present in the bounce log so
-    // an interrupted run can be continued without re-scoring completed work.
+    // When --resume is active, skip PRs already present in the strike checkpoint
+    // so an interrupted run can be continued without re-scoring completed work.
     if resume {
-        let processed_set = load_processed_pr_numbers(&janitor_dir);
-        if !processed_set.is_empty() {
+        if !checkpoint.processed_pr_numbers.is_empty()
+            || !checkpoint.processed_commit_shas.is_empty()
+        {
             let before = pr_entries.len();
-            pr_entries.retain(|(pr_num, _)| !processed_set.contains(pr_num));
+            pr_entries.retain(|(pr_num, pr_sha)| !checkpoint.contains(*pr_num, pr_sha));
             eprintln!(
-                "janitor hyper-drive: resume — skipping {} already-processed PRs ({} remaining)",
+                "janitor hyper-drive: resume [{}] — skipping {} checkpointed PRs ({} remaining)",
+                run_id,
                 before - pr_entries.len(),
                 pr_entries.len()
             );
         } else {
-            eprintln!("janitor hyper-drive: resume — no prior log found, processing all PRs");
+            eprintln!(
+                "janitor hyper-drive: resume [{}] — no prior checkpoint found, processing all PRs",
+                run_id
+            );
         }
         if pr_entries.is_empty() {
             eprintln!("janitor hyper-drive: resume — all PRs already processed, nothing to do");
@@ -145,13 +320,6 @@ pub fn cmd_hyper_drive(
     let registry = load_registry(repo_path)?;
 
     // ── Step 4: open bounce log for streaming writes ──────────────────────
-    let slug = repo_slug.map(str::to_owned).unwrap_or_else(|| {
-        repo_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
-
     // janitor_dir was already created in Step 2.5 — this is a no-op but
     // kept for clarity so the log_path derivation block remains self-contained.
 
@@ -164,8 +332,10 @@ pub fn cmd_hyper_drive(
 
     // Wrap in a BufWriter behind a mutex so rayon workers can write without
     // blocking each other for the duration of a syscall.
-    let writer: Arc<Mutex<BufWriter<std::fs::File>>> =
-        Arc::new(Mutex::new(BufWriter::new(log_file)));
+    let recorder: Arc<Mutex<StrikeRecorder>> = Arc::new(Mutex::new(StrikeRecorder::new(
+        BufWriter::new(log_file),
+        checkpoint,
+    )));
 
     // ── Step 5a: pre-emptive WOPR graph — serialize before any AST work ─────
     // Executed immediately after base resolution so that a SIGABRT from a
@@ -213,16 +383,35 @@ pub fn cmd_hyper_drive(
 
     pool.install(|| {
         pr_entries.par_iter().for_each(|(pr_num, pr_sha)| {
-            // Physarum Eviction Gate — RAM backpressure.
-            // A sleeping thread holds its stack and TLS allocations; sleeping
-            // under memory pressure worsens the very condition it tries to
-            // avoid.  Evict immediately: skip this PR, free the thread's
-            // allocations, and let the OS reclaim the memory.
-            if let Pulse::Stop = heart.beat() {
+            // Physarum Viscosity Gate — elastic RAM backpressure with deadlock guard.
+            //
+            // When RAM pressure exceeds 90% (Stop pulse) we park this thread for
+            // 500 ms to let sibling workers complete their bounces and free pages.
+            // At this point the thread holds NO heap allocations beyond its own stack.
+            //
+            // Deadlock guard: if ALL rayon workers enter this sleep simultaneously no
+            // work completes, RAM never drops, and the loop never exits.  We cap
+            // retries at MAX_STOP_RETRIES (10 × 500 ms = 5 s).  After the cap one
+            // worker breaks through, completes a bounce, frees memory, and unblocks
+            // the remaining parked workers on their next check.
+            const MAX_STOP_RETRIES: u32 = 10;
+            let mut stop_retries = 0u32;
+            while let Pulse::Stop = heart.beat() {
+                if stop_retries >= MAX_STOP_RETRIES {
+                    eprintln!(
+                        "  [PHYSARUM] RAM still >90% after {}ms — proceeding to prevent deadlock.",
+                        MAX_STOP_RETRIES * 500
+                    );
+                    break;
+                }
                 eprintln!(
-                    "  [PHYSARUM] RAM >90%. Evicting PR #{pr_num} to prevent OOM deadlock..."
+                    "  [PHYSARUM] RAM >90%. Pausing thread for 500ms to allow GC... \
+                     ({}/{})",
+                    stop_retries + 1,
+                    MAX_STOP_RETRIES
                 );
-                return;
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                stop_retries += 1;
             }
 
             let entry = bounce_one(repo_path_arc, &base_sha, pr_sha, &registry, *pr_num, &slug);
@@ -235,27 +424,26 @@ pub fn cmd_hyper_drive(
                 if entry.is_some() { "OK" } else { "SKIP" }
             );
             if let Some(ref e) = entry {
-                match serde_json::to_string(e) {
-                    Ok(line) => {
-                        if let Ok(mut guard) = writer.lock() {
-                            if writeln!(guard, "{line}").is_ok() {
-                                // Flush after every entry — guarantees that a SIGABRT
-                                // or core dump cannot lose a completed PR result.
-                                let _ = guard.flush();
-                                written.fetch_add(1, Ordering::Relaxed);
-                            }
+                if let Ok(mut guard) = recorder.lock() {
+                    match guard.record_success(*pr_num, pr_sha, e) {
+                        Ok(()) => {
+                            written.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "hyper-drive PR#{pr_num}: checkpoint/log write failed: {err}"
+                            );
                         }
                     }
-                    Err(err) => {
-                        eprintln!("hyper-drive PR#{pr_num}: serialize failed: {err}");
-                    }
+                } else {
+                    eprintln!("hyper-drive PR#{pr_num}: recorder lock poisoned");
                 }
             }
         });
     });
 
     // Final flush — drains any remaining BufWriter capacity.
-    if let Ok(mut guard) = writer.lock() {
+    if let Ok(mut guard) = recorder.lock() {
         let _ = guard.flush();
     }
 
@@ -466,6 +654,7 @@ fn bounce_one(
     pr_num: u32,
     repo_slug: &str,
 ) -> Option<BounceLogEntry> {
+    let bounce_started = std::time::Instant::now();
     // Extract the commit author directly from the Git object so the PDF Top
     // Contributors list is populated when running in hyper-drive (offline) mode,
     // which bypasses the GitHub API and has no other source of author metadata.
@@ -491,13 +680,23 @@ fn bounce_one(
         .map_err(|e| eprintln!("hyper-drive PR#{pr_num}: merge-base failed: {e}"))
         .ok()?;
 
+    // ── Git Signature Verification (P1-4) ─────────────────────────────────────
+    // Verify the cryptographic signature on this commit before evaluating any
+    // trust-based exemptions.  `Unsigned` and `Invalid` commits forfeit all
+    // trusted-author exemptions regardless of `trusted_bot_authors` /
+    // `automation_accounts` configuration — trust requires a signature.
+    let git_sig_status = forge::git_sig::verify_commit_signature(repo_path, pr_sha);
+    let git_sig_str = git_sig_status.as_str().to_owned();
+
     // ── Semantic Null pre-check (full-blob) ──────────────────────────────────
     // Compare full file blobs from the ODB rather than extracted patch lines.
     // If ALL modified source files share identical structural AST skeletons,
     // the PR only changes cosmetic tokens — bypass the full bounce pipeline.
     if forge::slop_filter::semantic_null_pr_check(repo_path, &merge_base_sha, pr_sha) {
         let sig = forge::pr_collider::PrDeltaSignature::from_bytes(pr_sha.as_bytes());
+        let analysis_duration_ms = bounce_started.elapsed().as_millis() as u64;
         return Some(BounceLogEntry {
+            execution_tier: "Community".to_string(),
             pr_number: Some(pr_num as u64),
             author,
             timestamp: utc_now_iso8601(),
@@ -516,24 +715,118 @@ fn bounce_one(
             suppressed_by_domain: 0,
             collided_pr_numbers: Vec::new(),
             necrotic_flag: Some("SEMANTIC_NULL".to_string()),
+            commit_sha: pr_sha.to_string(),
+            policy_hash: String::new(),
+            version_silos: Vec::new(),
+            agentic_pct: 0.0,
+            ci_energy_saved_kwh: crate::report::compute_ci_energy_saved_kwh(
+                analysis_duration_ms,
+                0,
+                Some("SEMANTIC_NULL"),
+                &[],
+                &[],
+            ),
+            provenance: crate::report::Provenance {
+                analysis_duration_ms,
+                ..crate::report::Provenance::default()
+            },
+            governor_status: None,
+            pqc_sig: None,
+            pqc_slh_sig: None,
+            pqc_key_source: None,
+            transparency_log: None,
+            wisdom_hash: None,
+            wisdom_signature: None,
+            wasm_policy_receipts: Vec::new(),
+            capsule_hash: None,
+            decision_receipt: None,
+            cognition_surrender_index: 0.0,
+            git_signature_status: Some(git_sig_str.clone()),
         });
     }
 
-    let (score, blobs) = bounce_git(repo_path, &merge_base_sha, pr_sha, registry)
-        .map_err(|e| {
-            eprintln!("hyper-drive PR#{pr_num}: {e}");
-        })
-        .ok()?;
+    let policy = common::policy::JanitorPolicy::load(repo_path).ok()?;
+    let mut scan_state = common::scan_state::ScanState::default();
+    let (mut score, blobs) = bounce_git(
+        repo_path,
+        &merge_base_sha,
+        pr_sha,
+        registry,
+        policy.suppressions.unwrap_or_default(),
+        false,
+        &mut scan_state,
+        policy.forge.clone_exempt_paths,
+    )
+    .map_err(|e| {
+        eprintln!("hyper-drive PR#{pr_num}: {e}");
+    })
+    .ok()?;
 
     // Zombie dependency scan over the blobs (best-effort).
     let zombie_deps = anatomist::manifest::find_zombie_deps_in_blobs(&blobs);
 
+    // Version silo detection — Tier 1: Cargo.toml / package.json blobs.
+    let mut version_silos = anatomist::manifest::find_version_silos_in_blobs(&blobs);
+
+    // Tier 2: resolved graph from in-memory Cargo.lock blob (supersedes Tier 1
+    // for Rust crates; npm/pip entries from Tier 1 are preserved).
+    //
+    // MANDATORY GATE: `Cargo.lock` must be present in the PR diff blobs before
+    // the lockfile silo detector runs.  `blobs` is built from the libgit2 diff
+    // (MergeSnapshot.patches) and contains only files changed by this PR — if
+    // Cargo.lock is absent the PR did not touch the dependency graph and CANNOT
+    // introduce new version silos.
+    let base_lock = fetch_base_lockfile(repo_path, &merge_base_sha);
+    let lockfile_in_diff = blobs
+        .keys()
+        .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("Cargo.lock"));
+    let lockfile_silos = if lockfile_in_diff {
+        anatomist::manifest::find_version_silos_from_lockfile(&blobs, base_lock.as_deref())
+    } else {
+        Vec::new()
+    };
+    if !lockfile_silos.is_empty() {
+        let lock_names: std::collections::HashSet<&str> =
+            lockfile_silos.iter().map(|s| s.name.as_str()).collect();
+        version_silos.retain(|n| !lock_names.contains(n.as_str()));
+        // One antipattern_details entry per siloed crate for UI readability.
+        version_silos.extend(lockfile_silos.iter().map(|s| s.display()));
+        version_silos.sort();
+    }
+
+    if !version_silos.is_empty() {
+        for silo in &version_silos {
+            score
+                .antipattern_details
+                .push(format!("architecture:version_silo — {silo}"));
+        }
+        score.version_silo_details = version_silos.clone();
+    }
+
     let slop_score = score.score();
+
+    // Explicit memory flush — compute provenance bytes then drop the
+    // MergeSnapshot blob map before building BounceLogEntry.  `blobs` can hold
+    // up to 1 MiB of raw file data per PR; releasing it here ensures the OS
+    // can reclaim those pages immediately after scoring, which is particularly
+    // important during the 500ms Physarum sleep windows that park workers under
+    // RAM pressure.
+    let source_bytes_processed: u64 = blobs.values().map(|v| v.len() as u64).sum();
+    drop(blobs);
 
     // Minimal MinHash signature for cross-PR collision hints in reports.
     let sig = forge::pr_collider::PrDeltaSignature::from_bytes(pr_sha.as_bytes());
 
+    let analysis_duration_ms = bounce_started.elapsed().as_millis() as u64;
+    let ci_energy_saved_kwh = crate::report::compute_ci_energy_saved_kwh(
+        analysis_duration_ms,
+        slop_score,
+        score.necrotic_flag.as_deref(),
+        &score.antipattern_details,
+        &score.collided_pr_numbers,
+    );
     Some(BounceLogEntry {
+        execution_tier: "Community".to_string(),
         pr_number: Some(pr_num as u64),
         author,
         timestamp: utc_now_iso8601(),
@@ -552,6 +845,28 @@ fn bounce_one(
         suppressed_by_domain: score.suppressed_by_domain,
         collided_pr_numbers: score.collided_pr_numbers,
         necrotic_flag: score.necrotic_flag,
+        commit_sha: pr_sha.to_string(),
+        policy_hash: String::new(),
+        version_silos,
+        agentic_pct: 0.0,
+        ci_energy_saved_kwh,
+        provenance: crate::report::Provenance {
+            analysis_duration_ms,
+            source_bytes_processed,
+            ..crate::report::Provenance::default()
+        },
+        governor_status: None,
+        pqc_sig: None,
+        pqc_slh_sig: None,
+        pqc_key_source: None,
+        transparency_log: None,
+        wisdom_hash: None,
+        wisdom_signature: None,
+        wasm_policy_receipts: Vec::new(),
+        capsule_hash: None,
+        decision_receipt: None,
+        cognition_surrender_index: 0.0,
+        git_signature_status: Some(git_sig_str),
     })
 }
 
@@ -609,11 +924,8 @@ fn build_symbols_rkyv(repo_path: &Path, base_sha: &str) -> Result<usize> {
             Some(n) => n,
             None => return 0,
         };
-        let ext = std::path::Path::new(name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_owned();
+        let surface = common::surface::SurfaceKind::from_path(std::path::Path::new(name));
+        let ext = surface.language_key().to_owned();
 
         // Only collect blobs with a grammar-backed extension.
         if matches!(
@@ -785,4 +1097,81 @@ fn load_processed_pr_numbers(janitor_dir: &Path) -> HashSet<u32> {
             v["pr_number"].as_u64().map(|n| n as u32)
         })
         .collect()
+}
+
+fn strike_run_id(repo_slug: &str, base_sha: &str, limit: usize) -> String {
+    let material = format!("{repo_slug}:{base_sha}:{limit}");
+    format!(
+        "strike-{}",
+        &blake3::hash(material.as_bytes()).to_hex()[..16]
+    )
+}
+
+fn strike_checkpoint_path(janitor_dir: &Path, run_id: &str) -> PathBuf {
+    janitor_dir
+        .join("strikes")
+        .join(run_id)
+        .join("checkpoint.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        load_processed_pr_numbers, strike_checkpoint_path, strike_run_id, StrikeCheckpoint,
+        StrikeCheckpointState,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "janitor-git-drive-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn strike_checkpoint_roundtrip_and_contains_processed_targets() {
+        let janitor_dir = temp_dir("checkpoint").join(".janitor");
+        fs::create_dir_all(&janitor_dir).unwrap();
+        let run_id = strike_run_id("owner/repo", "abcdef0123456789", 100);
+        let mut checkpoint = StrikeCheckpointState::fresh(&janitor_dir, &run_id);
+        checkpoint.mark_processed(42, "deadbeef");
+        checkpoint.persist_atomically().unwrap();
+
+        let restored = StrikeCheckpointState::load(&janitor_dir, &run_id);
+        assert!(restored.contains(42, "deadbeef"));
+        assert_eq!(restored.path, strike_checkpoint_path(&janitor_dir, &run_id));
+    }
+
+    #[test]
+    fn strike_checkpoint_seeds_from_existing_bounce_log() {
+        let janitor_dir = temp_dir("seed").join(".janitor");
+        fs::create_dir_all(&janitor_dir).unwrap();
+        fs::write(
+            janitor_dir.join("bounce_log.ndjson"),
+            "{\"pr_number\":7}\n{\"pr_number\":11}\n",
+        )
+        .unwrap();
+
+        let run_id = "strike-seeded";
+        let checkpoint = StrikeCheckpointState::load(&janitor_dir, run_id);
+        assert!(checkpoint.contains(7, "sha-a"));
+        assert!(checkpoint.contains(11, "sha-b"));
+        assert_eq!(load_processed_pr_numbers(&janitor_dir).len(), 2);
+        assert_eq!(checkpoint.doc.run_id, run_id);
+    }
+
+    #[test]
+    fn strike_checkpoint_serializes_empty_sha_list() {
+        let checkpoint = StrikeCheckpoint {
+            run_id: "strike-x".to_string(),
+            processed_pr_numbers: vec![1],
+            processed_commit_shas: Vec::new(),
+        };
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        assert!(json.contains("\"processed_pr_numbers\":[1]"));
+    }
 }

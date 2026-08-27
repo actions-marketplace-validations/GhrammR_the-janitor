@@ -1,223 +1,84 @@
-# The Janitor: Structural Firewall for AI-Generated Code
-**v7.8.6 — Rust-Native. Zero-Copy. Pro-Entropic Resilience at the Gate.**
+# The Janitor
 
-🎥 **[Watch the 60-Second Terminal Demo →](https://thejanitor.app)**
-
----
-
-> **Sonar finds style violations.**
-> **The Janitor enforces structural integrity.**
+**v10.2.11 — Rust static-analysis research across 23 grammars. IFDS + Z3 SMT + Kani proof obligations. Dual-PQC attestation. Zero-upload. On-device.**
 
 > *82% of open Godot Engine pull requests contain no issue link. 20% introduce language antipatterns. Zero comment scanners caught it. The Janitor did — across 50 live PRs, in under 90 seconds.*
 
----
+## What This Is
 
-## The Problem
+The Janitor is an active Rust security-research project. It explores how far a
+local static-analysis engine can push vulnerability discovery when syntactic
+pattern matching is paired with interprocedural dataflow, formal proof
+obligations, exploit-witness synthesis, and cryptographic provenance.
 
-The Veracode 2025 State of Software Security report established the baseline: AI-assisted code contains **36% more high-severity vulnerabilities** than human-written equivalents. Your linter passes Copilot output. Your SAST tool uploads it to a cloud pipeline. By the time the report arrives, the PR is merged.
+- 128,504 lines of Rust across 15 workspace crates
+- 1,400+ deterministic unit tests and Kani formal-verification harnesses
+- 23 tree-sitter grammars, IFDS taint solver across 14 languages
+- public security targets analyzed across Bugcrowd, HackerOne, and Immunefi
 
-The threat model has changed. Your enforcement layer has not.
+## Research Foundation
 
-## Zero-Friction GitHub Integration
+The Janitor is an active security research platform spanning four technical frontiers:
 
-![Janitor Sentinel Demo](docs/assets/sentinel_demo.webp)
+- **Interprocedural Taint Analysis (IFDS)** — full context-sensitive dataflow across 14 languages with sanitizer-registry suppression and Z3 SMT path-feasibility refinement.
+- **Formal Verification (Kani + Z3)** — every security-critical predicate ships with a `#[kani::proof]` harness proving absence of panics and integer overflow across all symbolic inputs. Z3-backed exploit witnesses synthesize `curl`-form reproduction commands from model-extracted payloads.
+- **Post-Quantum Provenance (ML-DSA-65 + SHA-384)** — all findings are sealed into SLSA Level 4 `DecisionCapsule` records with dual-PQC attestation, verifiable offline without source upload.
+- **Proof-Obligation Framework** — every KevCritical finding must carry a `ReachabilityProof`, `InvariantViolationProof`, or `LatticeGapProposal` before reaching the bounty ledger. This eliminates unprovable critical reports at triage time.
 
-*Janitor Sentinel automatically downgrades vetoes when it detects safe patterns (e.g., Dependabot).*
+## Current Research Questions
 
-## The Enforcement Layer
+- Can a small local engine reliably distinguish exploitable findings from
+  framework noise before a human writes a report?
+- Which proof obligations are sufficient to turn a syntactic detector into a
+  reproducible vulnerability claim?
+- How much evidence can be generated without uploading source code to a hosted
+  scanner or model provider?
+- Where do static detectors need formal predicates, symbolic constraints, or
+  explicit lattice-gap proposals instead of another rule string?
 
-The Janitor is not a linter. It is a **structural firewall** that runs on your hardware, on every pull request — before the merge button is available.
+## Cloud Reproducibility Track
 
-### Actuarial Risk Matrix
+Janitor findings can be reproduced in GitHub Actions and mapped onto Google
+Cloud Build and Artifact Registry provenance without uploading source code.
+A reproducibility run emits structured findings, proof-class decisions, SARIF,
+and SHA-384 provenance metadata that can be mirrored into Cloud Build
+attestations or Artifact Registry records while keeping repository contents
+inside the operator-controlled build environment. No source upload is required
+at any step — the GitHub Actions runner executes the full analysis pipeline
+locally and pushes only signed attestation records to Cloud infrastructure.
 
-The Janitor doesn't just find vulnerabilities — it generates a financial ledger. Every intercepted threat is categorized and billed:
+## Adversarial Robustness and Tool-Intent Safety
 
-- **Critical Threat** (security antipattern or Swarm collision): **$150/incident** — CI pipeline poisoned, supply-chain injection vector, or coordinated Agentic Swarm clone.
-- **Necrotic GC** (dead-code ghost, bot-closeable): **$20/PR** — automated garbage collection, no human triage required.
-- **Total Economic Impact** = sum of all categorical billings across the audit window.
+The Janitor treats prompt injection, MCP/tool dispatch, agentic origin, and
+untrusted-context transposition as security research surfaces. The engine tests
+these paths with deterministic proof obligations for prompt/tool
+non-interference, confused-deputy dispatch, agentic-origin classification, and
+retrieval-context trust before findings reach audit ledgers.
 
-Audited **33,000 PRs across 22 enterprise repositories on an 8 GB laptop.** The ledger is machine-generated, per-PR, and appended to `.janitor/bounce_log.ndjson` atomically on every merge event.
+## Research Findings
 
-### Integrity Dashboard (WOPR)
+**Finding 1 — Syntactic pattern matching is insufficient for triage-quality results.** The engine reliably produced findings that matched vulnerability patterns and reliably failed Tier-1 validation. The gap: detectors matched syntax but did not reason about surrounding context — auth decorators, sanitizer helpers, framework middleware pipelines, and scope rules.
 
-```
-janitor dashboard <repo>
-```
+**Finding 2 — Structural context resolution requires interprocedural dataflow.** Three oracle modules (`forge::threat_model_oracle`, `forge::jwt_keyfunc_oracle`, `forge::sql_sanitizer_oracle`) shipped to catch the highest-volume false-positive classes with deterministic AST guards. The structural approach is necessary and sufficient for known FP patterns; it does not surface previously-unknown paths.
 
-Visualize C/C++ compile-time blast radius and track structural Swarm clones in real-time. The WOPR (War Operations Plan Response) dashboard renders the top-10 `#include` dependency silos ranked by transitive reach — the files whose modification ripples furthest through the compile graph. Built from in-memory libgit2 tree walks; no filesystem checkout required.
+**Finding 3 — Proof-class annotation is the critical missing layer.** Candidate findings failed because the engine could not provide a mandatory `ReachabilityProof`, `InvariantViolationProof`, or `LatticeGapProposal`. The proof-obligation framework (Sprint 148–151) addresses this gap systematically with Kani-verified predicate harnesses for every new proof class.
 
-### Pro-Entropic Resilience
-
-The v7.8.6 NCD Entropy Gate compresses every patch blob via `zstd` and measures `compressed_len / raw_len`. AI-generated boilerplate is self-similar: it compresses below ratio `0.15`. Any blob crossing that threshold triggers `HighGenerativeVerbosity` (+50 points) before tree-sitter parses a single node.
-
-Two complementary shields eliminate false positives on legitimate non-application content:
-
-- **Null-Vector Collision Shield** — IaC bypass (`.nix`, `.lock`, `.json`, `.toml`, `.yaml`, `.yml`, `.csv`) + 256-byte size guard + `DOMAIN_VENDORED` router. CVE vendor patches touching `thirdparty/` score zero by construction. No legitimate infrastructure change can produce a spurious non-zero score.
-- **Net-Negative Exemption** — All score multipliers act exclusively on *newly introduced* symbols and patterns. Deletion-dominant patches — boilerplate purges, dead API removal, deprecated-code cleanup — mathematically cannot trigger any scoring signal. Score=0 is a proof, not a heuristic.
-
-### Zero-Copy Execution
-
-Every analysis executes via **memory-mapped file access**. Source code is never copied to heap, never serialized, never transmitted. No network call is made during the dead-symbol pipeline.
-
-**Benchmark:** 3.5 million lines of Godot Engine — **33 seconds, 58 MB peak RAM.** On a standard CI runner. Zero panics.
-
-### Zombie Dependency Detection
-
-AI generators hallucinate package imports. The Janitor scans `package.json`, `Cargo.toml`, `requirements.txt`, `spin.toml`, and `wrangler.toml` against the live symbol reference graph. A package that appears in your manifest but never appears in a reachable import path is a zombie dependency — flagged before merge.
-
-### Cryptographic Integrity Bonds
-
-When a pull request clears the slop gate, **Janitor Sentinel** — our GitHub App — automatically issues a **CycloneDX v1.5 CBOM** (Cryptography Bill of Materials) for the merge event. The CBOM records every cryptographic operation performed during the scan: the ML-DSA-65 (NIST FIPS 204) attestation signature, the BLAKE3 structural hashes, and the per-symbol audit entries covering `{timestamp}{file_path}{sha256_pre_cleanup}`. No token flag. No manual step. The proof is issued by the SaaS on a clean merge — a chain of custody for every line of code removed from production.
-
----
-
-## PR Gate: Live Results
-
-```
-Repos audited         : 22 enterprise repositories (godot, nixpkgs, vscode,
-                        k8s, pytorch, kafka, rust-lang/rust, tauri, redis,
-                        next.js, home-assistant, ansible, workers-sdk,
-                        langchain, deno, rails, laravel, apple/swift,
-                        aspnetcore, okhttp, terraform, neovim)
-PRs analyzed          : 33,000+  (live production PRs — no synthetic benchmarks)
-Hardware              : 8 GB laptop
-Engine panics         : 0
-OOM events            : 0
-```
-
-*Godot Engine alone (50 PRs, Feb 2026): 82% unlinked, 20% antipatterns. Zero false positives.*
-
----
-
-## How It Works
-
-1. **Scan** — Static reference graph + 6-stage heuristic pipeline identifies every dead symbol.
-2. **Simulate** — Shadow Tree overlays links to dead files. Your test suite runs against simulated deletion.
-3. **Remove** — Tests pass? Byte-precise surgical removal, bottom-to-top. Tests fail? Full rollback, zero corruption.
-
-## Quick Start
+## Reproduce Locally
 
 ```bash
-# Detect dead code (free)
-janitor scan ./src
-
-# Find duplicate functions (free)
-janitor dedup ./src
-
-# PR enforcement gate — score a diff (free)
-janitor bounce ./src --patch diff.patch
-
-# Shadow-simulate + remove dead code (free)
-janitor clean ./src --force-purge
+cargo test -p forge -- proof_obligation --test-threads=2
+cargo test -p forge -- reflexive_assurance --test-threads=2
+cargo run -p cli -- hunt /path/to/repository --concurrency 4
 ```
 
-## Language Support
+The default workflow is local and file-system scoped. Findings are ordinary
+structured records; research notes and implementation history live in
+`docs/CHANGELOG.md` and `.INNOVATION_LOG.md`.
 
-| Language | Dead Functions | Dead Classes | Dead Files | Duplicate Logic |
-|----------|:---:|:---:|:---:|:---:|
-| Python | ✓ | ✓ | ✓ | ✓ |
-| Rust | ✓ | ✓ | ✓ | ✓ |
-| JavaScript / TypeScript | ✓ | ✓ | ✓ | ✓ |
-| C++ | ✓ | ✓ | ✓ | ✓ |
-| Go | ✓ | ✓ | ✓ | ✓ |
-| C# / Java | ✓ | ✓ | ✓ | ✓ |
+## If you are considering building on this research
 
-## Runtime Architecture
+The architecture and approach are documented in `docs/` and the innovation log.
+The project is under active development; peer review, research collaboration,
+and reproducibility feedback are welcome. Contact: reghramm@gmail.com.
 
-| Subsystem | Technology | Property |
-|-----------|-----------|---------|
-| **AST Engine** | Tree-sitter (12 grammars) | O(n) CST construction; byte-range precision per token |
-| **Reference Graph** | Petgraph directed digraph | Topological dead-symbol filter; in-degree = 0 → candidate |
-| **Pattern Matching** | Aho-Corasick (single automaton per group) | O(n+m) multi-pattern scan; zero allocation in hot path |
-| **Registry Persistence** | rkyv + memmap2 | mmap-direct deserialization; no heap allocation for reads |
-| **Structural Hashing** | BLAKE3 (alpha-normalized AST) | Logic-clone detection across identifier rename boundaries |
-| **Fuzzy Dedup** | AstSimHasher (SimHash over CST tokens) | Classified as `Refactor`, `Zombie`, or `NewCode` |
-| **NCD Entropy Gate** | zstd level-3 compression ratio | O(N) boilerplate detector; fires before AST parse; ratio < 0.15 → `HighGenerativeVerbosity` |
-| **PR Quality Gate** | MinHash LSH (64 hashes, 8-band index) | Lock-free ArcSwap index; sub-linear collision detection |
-| **Deletion Engine** | Bottom-to-top byte-range splice | UTF-8 char-boundary hardened; zero re-parse overhead |
-| **Simulation Layer** | Symlink overlay (Shadow Tree) | Zero additional disk usage; tests run against simulated state |
-| **Audit Attestation** | ML-DSA-65 (NIST FIPS 204) | CycloneDX v1.5 CBOMs issued by Janitor Sentinel on clean merge |
-
-## Pricing
-
-**The enforcement is free. The attestation is the product.**
-
-| Tier | Cost | What You Get |
-|:-----|:-----|:-------------|
-| **Free** | $0 | Unlimited scan, clean, dedup, bounce, dashboard, report. No signed logs. |
-| **[Team](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7?enabled=1361348)** | **$499/yr** | All free features + ML-DSA-65 Integrity Bonds + CycloneDX v1.5 CBOMs + CI/CD Compliance Attestation + Janitor Sentinel GitHub App. Up to 25 seats. |
-| **[Industrial](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7)** | **Custom** | On-Premises Token Server + Keypair Rotation Protocol + SOC 2 Audit Support + Enterprise SLA. Unlimited seats. |
-
-[**Activate Attestation → thejanitor.lemonsqueezy.com**](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7)
-
-## CI Integration
-
-```yaml
-# PR slop gate — runs on every pull request (free)
-- id: janitor
-  uses: GhrammR/the-janitor@v6
-  with:
-    token: ${{ secrets.GITHUB_TOKEN }}
-
-# Outputs available downstream:
-# steps.janitor.outputs.slop_score
-# steps.janitor.outputs.antipatterns
-```
-
-## Commands
-
-```sh
-# Structural dead symbol audit
-janitor scan <path> [--library] [--format json]
-
-# PR enforcement gate
-janitor bounce <path> --patch <file> --pr-number <n> --author <handle> --pr-body "$BODY"
-
-# Zombie dependency detection (output includes zombie_deps)
-janitor scan <path> --format json
-
-# Structural clone detection
-janitor dedup <path>
-
-# Shadow-simulate → test → remove dead code
-janitor clean <path> --force-purge
-
-# Historical slop / clone / zombie intelligence report
-janitor report [--repo <path>] [--top <n>] [--format markdown|json]
-
-# Long-lived daemon (Unix socket, Physarum backpressure)
-janitor serve [--socket <path>] [--registry <file>]
-
-# Ratatui TUI dashboard
-janitor dashboard <path>
-```
-
-## Installation
-
-**From source (Rust 1.82+, `just` required):**
-
-```sh
-git clone https://github.com/GhrammR/the-janitor
-cd the-janitor
-just build
-# Binary: target/release/janitor
-```
-
-**Pre-built binary:**
-
-```sh
-# Download from Releases, then:
-chmod +x janitor && sudo mv janitor /usr/local/bin/
-```
-
-## The Proof
-
-> **3.5 million lines. 33 seconds. 58 megabytes. Zero panics.**
->
-> [Read the Godot Engine Autopsy →](https://thejanitor.app/case-studies/godot/)
-
-## License
-
-**Business Source License 1.1 (BUSL-1.1)** — Source Available. Converts to MIT on 2030-02-15.
-
-Scan, cleanup, dedup, bounce, and dashboard are permanently free. Integrity attestation is issued by [Janitor Sentinel](https://thejanitor.lemonsqueezy.com/checkout/buy/cf4f5dbd-1354-4e97-8b55-0d4375ec9be7) (Team tier).
+The most important lessons from building this platform — particularly around IFDS solver design, proof-class annotation at scale, and false-positive classification on polyglot codebases — are documented in `docs/CHANGELOG.md` as session-by-session implementation notes.

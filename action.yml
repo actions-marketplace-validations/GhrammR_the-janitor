@@ -1,172 +1,329 @@
-name: 'The Janitor'
+name: 'Janitor Firewall'
 description: >
-  Slop detection + dead-code firewall for pull requests.
-  Bounces the PR diff through tree-sitter AST analysis, fuzzy-clone detection,
-  and zombie-dep scanning. Writes a structured report to the Job Summary and
-  fails CI when the slop score reaches 100 or higher.
-author: 'GhrammR'
+  Zero-upload structural firewall for AI-generated PRs.
+  Fails hard on any error — symmetric failure ensures the gate is never left
+  pending. When a Governor URL is configured, the canonical PR verdict is the
+  'Janitor Integrity Check' run issued through the GitHub Checks API. When no
+  Governor URL is configured, the workflow job itself is the gate.
 
-branding:
-  icon: 'trash-2'
-  color: 'red'
-
-# ── Inputs ────────────────────────────────────────────────────────────────────
+# Only four inputs. All other configuration is governor-side.
 inputs:
-  repo:
-    description: >
-      Absolute or workspace-relative path to the repository root to analyse.
-      Leave blank to use $GITHUB_WORKSPACE (the default checked-out repo).
-    required: false
-    default: ''
   token:
+    description: 'GitHub token (contents: read, pull-requests: read)'
+    required: true
+  deep_scan:
+    description: 'Enable 32 MiB / 30 s deep-scan budgets for bounce analysis.'
+    required: false
+    default: 'false'
+  installation_id:
     description: >
-      GitHub token used to fetch the PR diff via `gh pr diff`.
-      Pass secrets.GITHUB_TOKEN — no elevated scopes required.
+      Janitor Sentinel App installation ID for this repository.
+      Auto-resolved from github.event.installation.id when omitted — only
+      required if the workflow is triggered outside a GitHub App event context
+      (e.g. workflow_dispatch or scheduled runs).
     required: false
     default: ''
-  fail_on_slop:
+  governor_url:
     description: >
-      Exit non-zero when the bounce slop score reaches 100 or higher.
-      Set to 'false' to surface findings without blocking the merge.
+      Base URL of your Sovereign Governor deployment.
+      Optional: when omitted, the action runs a local-only bounce gate on the
+      runner and fails the job on a rejected patch, but does not POST to a
+      Governor.  Provide a URL to publish the verdict through the Governor
+      control plane.  Example: https://governor.your-org.internal
     required: false
-    default: 'true'
+    default: ''
+  pr_number:
+    description: >
+      PR number override.  Set when invoking via workflow_dispatch to
+      re-trigger the gate after a pull_request.opened event was dropped
+      by GitHub Actions (Governor Janitor Integrity Check timed_out with
+      no gate run recorded).  When omitted, resolved from
+      github.event.pull_request.number.
+    required: false
+    default: ''
 
-# ── Outputs ───────────────────────────────────────────────────────────────────
-outputs:
-  slop_score:
-    description: 'Numeric slop score for this PR (0 = clean, ≥100 = gate triggered).'
-    value: ${{ steps.bounce.outputs.score }}
-  antipatterns:
-    description: 'Count of AST antipatterns found in this PR.'
-    value: ${{ steps.bounce.outputs.antipatterns }}
-
-# ── Implementation ────────────────────────────────────────────────────────────
 runs:
-  using: composite
+  using: 'composite'
   steps:
 
-    # Step 1 — Download the pre-built janitor binary from GitHub Releases.
-    #
-    # When the caller pins to a full semver tag (e.g. @v6.8.0) the action ref
-    # matches the release tag exactly, so we download that exact binary.
-    # Floating tags (@v6) fall back to the GitHub Releases "latest" API so
-    # they always track the newest stable drop without callers having to update
-    # their workflow files.
-    - name: Download janitor binary
+    - name: Resolve Bootstrap Tag
+      id: bootstrap
       shell: bash
-      run: |
-        ACTION_REF="${{ github.action_ref }}"
-        # Fallback for local testing or when action_ref is empty
-        if [[ -z "$ACTION_REF" ]]; then
-            ACTION_REF="main"
-        fi
-        
-        if [[ "$ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          DL_URL="https://github.com/GhrammR/the-janitor/releases/download/${ACTION_REF}/janitor"
-        else
-          # If main or floating tag, get latest release
-          DL_URL=$(curl -sSf \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/GhrammR/the-janitor/releases/latest" \
-            | jq -r '.assets[] | select(.name == "janitor") | .browser_download_url')
-        fi
-
-        echo "Downloading janitor from ${DL_URL} ..."
-        curl -sSfL "$DL_URL" -o /tmp/janitor
-        chmod +x /tmp/janitor
-
-    # Step 2 — Fetch the PR diff.
-    #
-    # Uses `gh pr diff` which requires no local git history — only
-    # `contents: read` + `pull-requests: read` permissions on GITHUB_TOKEN.
-    # Produces an empty patch if this is not a PR event or no token was given,
-    # which causes bounce to return score=0 (safe no-op).
-    - name: Fetch PR diff
-      shell: bash
-      run: |
-        PR_NUM="${{ github.event.pull_request.number }}"
-        if [[ -n "$PR_NUM" && -n "${{ inputs.token }}" ]]; then
-          gh pr diff "$PR_NUM" \
-            --repo "${{ github.repository }}" \
-            > /tmp/janitor_pr.patch 2>/dev/null \
-            || touch /tmp/janitor_pr.patch
-        else
-          touch /tmp/janitor_pr.patch
-        fi
       env:
         GH_TOKEN: ${{ inputs.token }}
-
-    # Step 3 — Run bounce, write Job Summary, enforce fail gate.
-    - name: Run bounce and write step summary
-      id: bounce
-      shell: bash
       run: |
-        REPO="${{ inputs.repo }}"
-        REPO="${REPO:-${GITHUB_WORKSPACE:-.}}"
-        PR_NUM="${{ github.event.pull_request.number }}"
-        AUTHOR="${{ github.event.pull_request.user.login }}"
-
-        # Build arg array: optional flags only added when non-empty so the
-        # binary never receives bare empty-string arguments.
-        BOUNCE_ARGS=(bounce "$REPO" --patch /tmp/janitor_pr.patch --format json)
-        [[ -n "$PR_NUM" ]] && BOUNCE_ARGS+=(--pr-number "$PR_NUM")
-        [[ -n "$AUTHOR" ]] && BOUNCE_ARGS+=(--author    "$AUTHOR")
-
-        # janitor:ignore security:lotl_execution_anomaly
-        RESULT=$(/tmp/janitor "${BOUNCE_ARGS[@]}" 2>/dev/null || echo '{"slop_score":0}')
-
-        SCORE=$(   echo "$RESULT" | jq -r '.slop_score           // 0')
-        ANTI=$(    echo "$RESULT" | jq -r '.antipatterns_found   // 0')
-        ZOMBIES=$( echo "$RESULT" | jq -r '.zombie_symbols_added // 0')
-        UNLINKED=$(echo "$RESULT" | jq -r '.unlinked_pr          // 0')
-
-        # Propagate to subsequent steps / calling workflow via GITHUB_OUTPUT.
-        echo "score=${SCORE}"       >> "$GITHUB_OUTPUT"
-        echo "antipatterns=${ANTI}" >> "$GITHUB_OUTPUT"
-
-        # ── Job Summary ───────────────────────────────────────────────────────
-        {
-          echo "## The Janitor — PR #${PR_NUM:-?} Slop Report"
-          echo ""
-          echo "| Metric | Value |"
-          echo "|--------|-------|"
-          echo "| **Slop Score** | ${SCORE} |"
-          echo "| Antipatterns | ${ANTI} |"
-          echo "| Zombie Deps Added | ${ZOMBIES} |"
-          if [[ "$UNLINKED" == "1" ]]; then
-            echo "| Linked Issue | ⚠️ None |"
-          else
-            echo "| Linked Issue | ✅ Present |"
-          fi
-          echo ""
-
-          # Antipattern detail list (deduplicated by jq).
-          DETAILS=$(echo "$RESULT" \
-            | jq -r '(.antipattern_details // []) | unique | .[]' 2>/dev/null || true)
-          if [[ -n "$DETAILS" ]]; then
-            echo "### Antipatterns"
-            echo ""
-            while IFS= read -r d; do
-              echo "- \`$d\`"
-            done <<< "$DETAILS"
-            echo ""
-          fi
-
-          # Score verdict using GitHub's alert callout syntax.
-          if [[ "${SCORE}" -ge 100 ]]; then
-            echo "> [!CAUTION]"
-            echo "> **SLOP GATE TRIGGERED** — Score ${SCORE} ≥ 100. Address findings before merge."
-          elif [[ "${SCORE}" -gt 0 ]]; then
-            echo "> [!WARNING]"
-            echo "> Score ${SCORE} — Minor findings detected. Review recommended."
-          else
-            echo "> [!NOTE]"
-            echo "> Score 0 — Clean PR. No slop detected."
-          fi
-        } >> "$GITHUB_STEP_SUMMARY"
-
-        # ── Fail gate ─────────────────────────────────────────────────────────
-        if [[ "${{ inputs.fail_on_slop }}" == "true" && "${SCORE}" -ge 100 ]]; then
-          echo "::error title=Slop Gate::Score ${SCORE} ≥ 100 — see Job Summary for details."
+        set -euo pipefail
+        BOOTSTRAP_TAG="$(gh release view --repo janitor-security/the-janitor --json tagName -q .tagName 2>/dev/null || true)"
+        if [ -z "${BOOTSTRAP_TAG}" ]; then
+          BOOTSTRAP_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+        fi
+        if [ -z "${BOOTSTRAP_TAG}" ]; then
+          echo "failed to resolve bootstrap release tag" >&2
           exit 1
         fi
+        echo "BOOTSTRAP_TAG=${BOOTSTRAP_TAG}" >> "$GITHUB_ENV"
+        echo "BOOTSTRAP_DIR=/tmp/janitor-bin/bootstrap/${BOOTSTRAP_TAG}" >> "$GITHUB_ENV"
+        echo "CURRENT_DIR=/tmp/janitor-bin/current" >> "$GITHUB_ENV"
+        echo "JANITOR_BIN=/tmp/janitor-bin/current/janitor" >> "$GITHUB_ENV"
+
+    - name: Restore Bootstrap Cache
+      id: bootstrap-cache
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: /tmp/janitor-bin/bootstrap
+        key: janitor-bootstrap-${{ runner.os }}-${{ env.BOOTSTRAP_TAG }}
+
+    # Step 1 — Download and verify the Janitor binary via non-circular trust chain.
+    #
+    # SLSA Level 4 provenance: the binary in CI is the exact artifact emitted by
+    # the signed release pipeline.
+    #
+    # CIRCULAR TRUST FIX: the previous approach used the NEW binary's co-hosted .sha384
+    # file and Python to verify itself — circular because a tampered CDN could supply
+    # a matching (tampered binary, matching .sha384) pair.  The corrected approach
+    # bootstraps a PREVIOUSLY RELEASED, ALREADY TRUSTED version of the Janitor CLI
+    # and uses ITS embedded ML-DSA-65 release verifying key to validate the new binary.
+    #
+    # Verification sequence:
+    #   1. Download the new binary (.sha384 and .sig) from the GitHub Release CDN.
+    #   2. Download a HARDCODED bootstrap binary from the prior known-good release.
+    #      (This binary is trusted because it was verified by a previous release cycle.)
+    #   3. Verify the downloaded SHA-384 sidecar with `sha384sum -c`.
+    #   4. Run `bootstrap verify-asset --file NEW --hash NEW.sha384 [--sig NEW.sig]`.
+    #      The bootstrap binary carries the release verifying key for the NEW release.
+    #   5. `verify-asset` exits 1 on any hash/signature mismatch → Action fails hard.
+    #
+    - name: Download and Verify Janitor Binary
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        ACTION_TAG="${{ github.action_ref }}"
+        # When the action is consumed via `uses: ./` (dogfood / self-host),
+        # github.action_ref is empty.  Fall back to BOOTSTRAP_TAG so the gate
+        # still verifies the latest published artifact instead of resolving to
+        # the URL `…/releases/download/v/janitor` (404).
+        if [ -z "${ACTION_TAG}" ]; then
+            ACTION_TAG="${BOOTSTRAP_TAG}"
+        fi
+        # Normalize: ensure the tag starts with 'v' for the GitHub Release URL.
+        [[ "${ACTION_TAG}" == v* ]] || ACTION_TAG="v${ACTION_TAG}"
+        mkdir -p "${CURRENT_DIR}" "${BOOTSTRAP_DIR}"
+        # Use `gh release download` (authenticated GitHub API) rather than raw curl.
+        # Direct curl follows a 302 redirect to S3 with a URL-signed token
+        # (X-Amz-SignedHeaders=host).  Forwarding an Authorization header to S3
+        # causes 401 because X-Amz-SignedHeaders=host means only `host` is signed —
+        # any additional header breaks the S3 signature check.  `gh` uses the API
+        # endpoint and handles auth+redirect correctly without forwarding the token.
+
+        # ── Download current release artifacts.
+        gh release download "${ACTION_TAG}" \
+          --repo janitor-security/the-janitor \
+          --pattern "janitor" \
+          --pattern "janitor.sha384" \
+          --dir "${CURRENT_DIR}" \
+          --clobber
+        gh release download "${ACTION_TAG}" \
+          --repo janitor-security/the-janitor \
+          --pattern "janitor.sig" \
+          --dir "${CURRENT_DIR}" \
+          --clobber 2>/dev/null || true
+
+        # ── Bootstrap: fetch the previous known-good Janitor binary as the verifier.
+        # This binary is from a prior release cycle whose integrity was already
+        # established.  It carries the ML-DSA-65 release verifying key and can
+        # authenticate the current release artifact without relying on any asset
+        # co-hosted with the binary under verification (circular trust eliminated).
+        if [ ! -x "${BOOTSTRAP_DIR}/janitor" ]; then
+          gh release download "${BOOTSTRAP_TAG}" \
+            --repo janitor-security/the-janitor \
+            --pattern "janitor" \
+            --pattern "janitor.sha384" \
+            --dir "${BOOTSTRAP_DIR}" \
+            --clobber
+          gh release download "${BOOTSTRAP_TAG}" \
+            --repo janitor-security/the-janitor \
+            --pattern "janitor.sig" \
+            --dir "${BOOTSTRAP_DIR}" \
+            --clobber 2>/dev/null || true
+        fi
+
+        BOOTSTRAP_BIN="${BOOTSTRAP_DIR}/janitor"
+        chmod +x "${BOOTSTRAP_BIN}"
+
+        # ── Layer 1: SHA-384 via coreutils.
+        printf '%s  %s\n' "$(tr -d '\n' < "${CURRENT_DIR}/janitor.sha384")" "${CURRENT_DIR}/janitor" | sha384sum -c -
+        # ── Layer 2: ML-DSA-65 via bootstrap verifier.
+        # verify-asset recomputes SHA-384 internally and verifies the detached
+        # ML-DSA-65 signature if a .sig file is present.
+        if [ -f "${CURRENT_DIR}/janitor.sig" ]; then
+            "${BOOTSTRAP_BIN}" verify-asset \
+                --file "${CURRENT_DIR}/janitor" \
+                --hash "${CURRENT_DIR}/janitor.sha384" \
+                --sig  "${CURRENT_DIR}/janitor.sig"
+            echo "Trust chain verified: SHA-384 + ML-DSA-65 via bootstrap ${BOOTSTRAP_TAG}"
+        else
+            # .sig absent (pre-PQC or unsigned release) — SHA-384-only via bootstrap.
+            "${BOOTSTRAP_BIN}" verify-asset \
+                --file "${CURRENT_DIR}/janitor" \
+                --hash "${CURRENT_DIR}/janitor.sha384"
+            echo "Trust chain verified: SHA-384-only via bootstrap ${BOOTSTRAP_TAG} (no .sig)"
+        fi
+        chmod +x "${JANITOR_BIN}"
+
+    # Step 4 — Extract the PR unified diff.
+    # Also runs on workflow_dispatch re-triggers (inputs.pr_number set).
+    - name: Extract Patch
+      if: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.pr_number != '') }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        PR_NUM="${{ inputs.pr_number || github.event.pull_request.number }}"
+        gh pr diff "${PR_NUM}" \
+          --repo "${{ github.repository }}" \
+          > .janitor-pr.patch
+
+    # Step 5 — Run bounce locally, and POST the result to the Governor when configured.
+    #
+    # set -eo pipefail: any command failure (curl, janitor bounce, jq) exits
+    # immediately with a non-zero code, failing the Action visibly rather than
+    # silently swallowing the error and leaving the Governor Check Run pending
+    # for 9+ hours.  Symmetric failure — the workflow fails when the engine
+    # fails; it succeeds when the engine succeeds.
+    - name: Execute Stateless Firewall
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Resolve HEAD_SHA: prefer PR event context; fall back to gh pr view
+        # for workflow_dispatch re-triggers where the event payload is absent.
+        HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+        if [ -z "${HEAD_SHA}" ]; then
+          _PR_NUM="${{ inputs.pr_number }}"
+          if [ -n "${_PR_NUM}" ]; then
+            HEAD_SHA="$(gh pr view "${_PR_NUM}" \
+              --repo "${{ github.repository }}" \
+              --json headRefOid -q .headRefOid)"
+          fi
+        fi
+        GOVERNOR="${{ inputs.governor_url }}"
+        GOVERNOR_CURL_OPTS=(--fail --show-error --silent --connect-timeout 5 --max-time 30 --retry 0)
+        JANITOR_TIMEOUT_SECONDS=120
+        _PR_NUM_RESOLVED="${{ inputs.pr_number || github.event.pull_request.number }}"
+        BOUNCE_ARGS=(
+          bounce .
+          --patch .janitor-pr.patch
+          --pr-number "${_PR_NUM_RESOLVED}"
+          --head-sha "$HEAD_SHA"
+        )
+        if [ "${{ inputs.deep_scan }}" = "true" ]; then
+          BOUNCE_ARGS+=(--deep-scan)
+        fi
+
+        # Dependabot PRs do not receive repository secrets.  When no Governor
+        # endpoint is configured, enforce the gate locally by parsing the JSON
+        # verdict emitted by `janitor bounce`.
+        if [ -z "${GOVERNOR}" ]; then
+            echo "Governor URL absent — running local-only structural gate."
+            BOUNCE_OUT=$(timeout "${JANITOR_TIMEOUT_SECONDS}s" "$JANITOR_BIN" "${BOUNCE_ARGS[@]}" --format json)
+            printf '%s\n' "${BOUNCE_OUT}"
+            BOUNCE_JSON=$(printf '%s\n' "${BOUNCE_OUT}" | sed -n '/^{/,/^}/p')
+            if [ -z "${BOUNCE_JSON}" ]; then
+                echo "failed to parse local bounce JSON verdict" >&2
+                exit 1
+            fi
+            GATE_PASSED="$(printf '%s\n' "${BOUNCE_JSON}" | jq -er '.gate_passed')"
+            # Post a named commit status so the verdict appears as "Janitor Integrity Check"
+            # on the PR even when running without a Governor URL.
+            if [ -n "${HEAD_SHA}" ] && [ -n "${{ github.repository }}" ]; then
+                STATUS_STATE="failure"
+                STATUS_DESC="Structural gate rejected patch (local-only mode)"
+                if [ "${GATE_PASSED}" = "true" ]; then
+                    STATUS_STATE="success"
+                    STATUS_DESC="Structural gate passed (local-only mode)"
+                fi
+                gh api \
+                    --method POST \
+                    "repos/${{ github.repository }}/statuses/${HEAD_SHA}" \
+                    -f state="${STATUS_STATE}" \
+                    -f context="Janitor Integrity Check" \
+                    -f description="${STATUS_DESC}" \
+                    --silent 2>/dev/null || true
+            fi
+            if [ "${GATE_PASSED}" != "true" ]; then
+                echo "Janitor gate rejected patch in local-only mode." >&2
+                exit 1
+            fi
+            exit 0
+        fi
+
+        # Resolve installation ID — prefer explicit input, fall back to the
+        # installation context embedded in the App's webhook event payload.
+        # If still absent or 0, call /v1/resolve-id to auto-resolve via the
+        # Governor's App token — eliminates the "Wrong ID" support overhead.
+        INSTALL_ID="${{ inputs.installation_id || github.event.installation.id || '0' }}"
+        if [ "${INSTALL_ID}" = "0" ] || [ -z "${INSTALL_ID}" ]; then
+            # resolve-id is best-effort — a 429 or network blip must never abort
+            # the gate.  Omit --fail so curl exits 0 on HTTP errors; fall back
+            # to '{}' so jq always gets valid JSON.
+            _RESOLVE_BODY=$(curl --show-error --silent --connect-timeout 5 --max-time 30 \
+                -X POST "${GOVERNOR}/v1/resolve-id" \
+                -H "Content-Type: application/json" \
+                -d "{\"repo_slug\":\"${{ github.repository }}\"}" 2>/dev/null || echo '{}')
+            RESOLVED=$(printf '%s\n' "${_RESOLVE_BODY}" | jq -r '.installation_id // 0' 2>/dev/null || echo '0')
+            if [ "${RESOLVED:-0}" != "0" ]; then
+                INSTALL_ID="${RESOLVED}"
+            fi
+        fi
+
+        # _PR_NUM_RESOLVED is set above from inputs.pr_number || github.event.pull_request.number.
+        # Do NOT use ${{ github.event.pull_request.number }} here — it is empty on
+        # workflow_dispatch, which causes jq --argjson to receive an empty string
+        # and exit 2 (invalid JSON), blocking every manual re-trigger.
+        TOKEN_PAYLOAD=$(jq -n \
+          --arg  repo "${{ github.repository }}" \
+          --argjson pr  "${_PR_NUM_RESOLVED}" \
+          --arg  sha  "$HEAD_SHA" \
+          --arg  id   "${INSTALL_ID:-0}" \
+          '{repo: $repo, pr: $pr, head_sha: $sha, installation_id: (if $id == "" then 0 else ($id | tonumber) end)}')
+
+        ANALYSIS_TOKEN=$(curl "${GOVERNOR_CURL_OPTS[@]}" --retry 3 --retry-delay 10 -X POST \
+          "${GOVERNOR}/v1/analysis-token" \
+          -H "Content-Type: application/json" \
+          -d "$TOKEN_PAYLOAD" | jq -er '.token')
+
+        timeout "${JANITOR_TIMEOUT_SECONDS}s" "$JANITOR_BIN" "${BOUNCE_ARGS[@]}" \
+          --governor-url  "${GOVERNOR}" \
+          --analysis-token "$ANALYSIS_TOKEN"
+
+    # Step 6 — Publish Integrity Dashboard to GitHub Actions Step Summary.
+    #
+    # Reads the bounce log written by step 5 and appends a high-density
+    # Markdown dashboard (Integrity Radar, Structural Topology, Provenance
+    # Ledger, Vibe-Check) to the job summary visible in the Actions tab.
+    # Best-effort (|| true): a rendering failure must never mask a real bounce
+    # verdict or leave the Check Run in an ambiguous state.
+    - name: Publish Integrity Dashboard
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -f .janitor/bounce_log.ndjson ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          "$JANITOR_BIN" step-summary . >> "$GITHUB_STEP_SUMMARY" || true
+        fi
+
+    # Step 7 — Tabula Rasa: vaporise all /tmp artefacts and local caches.
+    #
+    # Runs unconditionally (even on failure) so that no state from this PR
+    # execution can leak into a subsequent run on the same hosted runner.
+    # Removes the compiled Janitor binary, the extracted patch, and any
+    # step-summary artefacts written to /tmp.
+    - name: Cleanup Artifacts (Tabula Rasa)
+      if: always()
+      shell: bash
+      run: |
+        rm -rf /tmp/janitor-bin/current /tmp/janitor-selftest-* .janitor-pr.patch /tmp/janitor.sig || true

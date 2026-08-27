@@ -7,18 +7,23 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
-    # External OpenSSF API timeouts must not block PR merges.
-    # The Janitor slop-gate (janitor-pr-gate.yml) is the primary blocking check.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write # required-by-design: action comments the dependency summary on the PR
+    # Non-blocking by design: transient GitHub Dependency Graph API fetch failures
+    # must not block Dependabot auto-merge. "Dependency Review" is intentionally
+    # absent from branch-protection required_status_checks (Law W-VI). The Janitor
+    # slop-gate (janitor-pr-gate.yml) is the sole blocking integrity check.
     continue-on-error: true
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b # v2.15.0
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -26,7 +31,9 @@ jobs:
             github.com:443
 
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0  # dependency-review-action fetches refs/pull/N/merge; shallow clone fails to resolve the merge-ref pack object
 
       - name: Dependency Review
         uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4

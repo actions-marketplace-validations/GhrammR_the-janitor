@@ -12,10 +12,26 @@
 
 use rkyv::bytecheck::CheckBytes;
 use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// Package ecosystem / manifest type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, Deserialize, Serialize, CheckBytes)]
-#[rkyv(derive(Debug))]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Archive,
+    Deserialize,
+    Serialize,
+    SerdeSerialize,
+    SerdeDeserialize,
+    CheckBytes,
+)]
+#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord))]
 #[repr(u8)]
 pub enum DependencyEcosystem {
     /// Node.js / npm / yarn / pnpm (`package.json`).
@@ -32,6 +48,12 @@ pub enum DependencyEcosystem {
     /// in a shell script (`.sh`).  Covers CI/CD pipeline toolchain deps that
     /// are installed but may never actually be invoked.
     Apt = 5,
+    /// Java / JVM — Maven `pom.xml` dependencies (`groupId:artifactId`).
+    Maven = 6,
+    /// .NET — NuGet `<PackageReference>` in `.csproj` / `.fsproj`.
+    NuGet = 7,
+    /// Ruby — `Gemfile.lock` and `Gemfile` gem declarations.
+    RubyGems = 8,
 }
 
 impl std::fmt::Display for DependencyEcosystem {
@@ -43,6 +65,9 @@ impl std::fmt::Display for DependencyEcosystem {
             DependencyEcosystem::Wasm => f.write_str("wasm"),
             DependencyEcosystem::CloudflareBinding => f.write_str("cloudflare"),
             DependencyEcosystem::Apt => f.write_str("apt"),
+            DependencyEcosystem::Maven => f.write_str("maven"),
+            DependencyEcosystem::NuGet => f.write_str("nuget"),
+            DependencyEcosystem::RubyGems => f.write_str("rubygems"),
         }
     }
 }

@@ -8,13 +8,18 @@ on:
   schedule:
     - cron: '30 1 * * 0'
 
+# Workflow-level: deny all by default.
+permissions:
+  contents: read
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: 'ubuntu-latest'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
-      security-events: write
-      actions: read
+      security-events: write # required-by-design: upload CodeQL SARIF to code scanning
+      actions: read          # required-by-design: CodeQL action reads workflow metadata
       contents: read
 
     strategy:
@@ -24,20 +29,20 @@ jobs:
 
     steps:
     - name: Harden Runner
-      uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
+      uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
       with:
         egress-policy: audit
 
     - name: Checkout repository
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@c793b717bc78562f491db7b0e93a3a178b099162 # v4.32.5
+      uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
       with:
         languages: ${{ matrix.language }}
         build-mode: none
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@c793b717bc78562f491db7b0e93a3a178b099162 # v4.32.5
+      uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
       with:
         category: "/language:${{matrix.language}}"

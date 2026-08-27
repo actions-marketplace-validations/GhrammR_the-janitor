@@ -1,0 +1,120 @@
+name: Janitor Self-Attestation
+
+# Runs on every push to main. Scans HEAD and uploads the generated integrity
+# badge as a workflow artifact. The workflow does not write back to main.
+
+on:
+  push:
+    branches:
+      - main
+  # Manual trigger so operators can re-run the badge commit without an
+  # empty push.  Symmetric with pages.yml.
+  workflow_dispatch:
+
+# Workflow-level: deny all by default.
+permissions:
+  contents: read
+
+jobs:
+  self-attest:
+    name: Integrity Scan & Badge Commit
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      # Deterministic, runner-owned path inside the workspace.  Avoids the
+      # `~/.cache/sccache/preprocessor: Permission denied (os error 13)` seen
+      # when an earlier action left a $HOME cache dir owned by another uid.
+      SCCACHE_DIR: ${{ github.workspace }}/.cache/sccache
+      SCCACHE_CACHE_SIZE: 2G
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Fetch full history so janitor can walk the commit graph.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Prepare sccache directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$SCCACHE_DIR"
+
+      - name: Restore sccache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ github.workspace }}/.cache/sccache
+          key: ${{ runner.os }}-sccache-janitor-main-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sccache-janitor-main-
+
+      # Restore cached janitor binary.  Key mirrors action.yml so PR-gate
+      # and self-attestation hits share the same cache entry.
+      - name: Cache Janitor Binary
+        id: cache-build
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: /tmp/the-janitor/target/release/janitor
+          key: ${{ runner.os }}-rust-stable-janitor-v3-${{ hashFiles('**/Cargo.lock', 'crates/**/*.rs', 'crates/**/Cargo.toml') }}
+
+      - name: Bootstrap Janitor Engine
+        if: steps.cache-build.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch main \
+            https://github.com/janitor-security/the-janitor.git /tmp/the-janitor
+          cargo build --manifest-path /tmp/the-janitor/Cargo.toml --release -p cli
+
+      - name: Export Janitor Binary Path
+        shell: bash
+        run: echo "JANITOR_BIN=/tmp/the-janitor/target/release/janitor" >> "$GITHUB_ENV"
+
+      # Execute Stateless Firewall — full repo scan on HEAD.
+      # Writes .janitor/janitor_badge.svg as part of the scan report.
+      - name: Set up Janitor toolchain
+        uses: ./.github/actions/toolchain-setup
+
+      - name: Formal toolchain preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/toolchain-preflight.sh
+
+      - name: Execute Stateless Firewall
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$JANITOR_BIN" scan .
+
+      - name: Upload Integrity Badge
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: janitor-integrity-badge-${{ github.sha }}
+          path: .janitor/janitor_badge.svg
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Tabula Rasa: wipe /tmp artefacts so no state leaks to the next run.
+      - name: Cleanup Artifacts (Tabula Rasa)
+        if: always()
+        shell: bash
+        run: |
+          rm -rf /tmp/the-janitor || true
+
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true

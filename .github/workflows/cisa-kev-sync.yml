@@ -1,0 +1,185 @@
+name: CISA KEV Weekly Sync
+
+# Fetches the CISA Known Exploited Vulnerabilities (KEV) catalog every Monday
+# via `janitor update-wisdom --ci-mode`, which writes:
+#   - .janitor/wisdom.rkyv           (binary Wisdom Registry)
+#   - .janitor/wisdom_manifest.json  (diffable JSON manifest of all CVE entries)
+#
+# The workflow diffs the manifest against the last committed snapshot and
+# uploads an operator-review artifact containing:
+#   - Updated .janitor/cisa_kev_ids.txt  (sorted CVE-ID list for future diffs)
+#   - .janitor/kev_checklist.md          (new entries + AST gate checklist)
+#
+# The engine is the sole arbiter of threat intelligence — no raw curl to CISA.
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'   # Every Monday at 00:00 UTC
+  workflow_dispatch:        # Manual trigger for ad-hoc syncs
+
+permissions:
+  contents: read
+
+jobs:
+  kev-sync:
+    name: CISA KEV Sync & Gate Checklist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            release-assets.githubusercontent.com:443
+            objects.githubusercontent.com:443
+            api.thejanitor.app:443
+            www.cisa.gov:443
+            osv-vulnerabilities.storage.googleapis.com:443
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download latest janitor binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/janitor-bin
+          # Mandatory artifacts: the binary plus its SHA-384 sidecar.
+          # `gh release download --pattern "janitor"` matches the literal asset
+          # name "janitor" only — it does NOT glob over janitor.sha384 / .sig.
+          gh release download --repo janitor-security/the-janitor \
+            --pattern "janitor" \
+            --pattern "janitor.sha384" \
+            --dir /tmp/janitor-bin \
+            --clobber
+          # Optional artifact: ML-DSA-65 signature.  Older releases (pre-PQC)
+          # ship without one — failing the whole job because the asset is
+          # absent is a regression, so swallow the non-zero exit.
+          gh release download --repo janitor-security/the-janitor \
+            --pattern "janitor.sig" \
+            --dir /tmp/janitor-bin \
+            --clobber 2>/dev/null || true
+          [ -f /tmp/janitor-bin/janitor ] || { echo "FATAL: janitor binary not found after download"; exit 1; }
+          chmod +x /tmp/janitor-bin/janitor
+          # Verify binary integrity before executing — mirrors the discipline in action.yml
+          if [ -f /tmp/janitor-bin/janitor.sig ]; then
+            /tmp/janitor-bin/janitor verify-asset \
+              --file /tmp/janitor-bin/janitor \
+              --hash /tmp/janitor-bin/janitor.sha384 \
+              --sig  /tmp/janitor-bin/janitor.sig
+          else
+            /tmp/janitor-bin/janitor verify-asset \
+              --file /tmp/janitor-bin/janitor \
+              --hash /tmp/janitor-bin/janitor.sha384
+          fi
+          /tmp/janitor-bin/janitor --version
+
+      - name: Run update-wisdom --kev-manifest-only
+        # The weekly diff PR only consumes .janitor/wisdom_manifest.json — it does
+        # NOT need the wisdom.rkyv binary mirror.  Coupling this workflow to a
+        # separate (potentially-undeployed) signed-mirror endpoint was the root
+        # cause of the 2026-Q2 weekly-sync outage.  --kev-manifest-only fetches
+        # ONLY the CISA KEV catalog (with 3-attempt exponential backoff) and
+        # writes the JSON manifest, leaving full wisdom.rkyv sync to ad-hoc
+        # `janitor update-wisdom --ci-mode` runs.
+        run: |
+          set -euo pipefail
+          /tmp/janitor-bin/janitor update-wisdom . --kev-manifest-only
+          echo "Manifest written:"
+          wc -l .janitor/wisdom_manifest.json
+
+      - name: Diff against known snapshot
+        id: diff
+        run: |
+          set -euo pipefail
+          # Extract sorted CVE-ID list from the freshly-written manifest.
+          jq -r '.entries[].cve_id' .janitor/wisdom_manifest.json | sort \
+            > .janitor/kev_ids_new.txt
+
+          # If no prior snapshot exists, create baseline and skip PR.
+          if [[ ! -f .janitor/cisa_kev_ids.txt ]]; then
+            echo "No prior snapshot — writing baseline. No PR will be opened."
+            cp .janitor/kev_ids_new.txt .janitor/cisa_kev_ids.txt
+            echo "new_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Compute additions (lines in new but not in known).
+          comm -23 .janitor/kev_ids_new.txt .janitor/cisa_kev_ids.txt \
+            > .janitor/kev_added.txt || true
+          NEW_COUNT=$(wc -l < .janitor/kev_added.txt | tr -d ' ')
+          echo "new_count=${NEW_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "${NEW_COUNT} new KEV entries detected"
+
+      - name: Generate AST gate checklist
+        if: steps.diff.outputs.new_count != '0'
+        run: |
+          set -euo pipefail
+          TODAY=$(date +%Y-%m-%d)
+          CHECKLIST=".janitor/kev_checklist.md"
+
+          {
+            echo "# CISA KEV Sync — ${TODAY}"
+            echo ""
+            echo "$(wc -l < .janitor/kev_added.txt | tr -d ' ') new entries in the CISA KEV catalog since last sync."
+            echo ""
+            echo "## New Entries"
+            echo ""
+            echo "| CVE ID | Vendor | Product | Vulnerability | Date Added |"
+            echo "|--------|--------|---------|---------------|------------|"
+
+            while IFS= read -r cve_id; do
+              ROW=$(jq -r --arg id "$cve_id" '
+                .entries[] | select(.cve_id == $id) |
+                "| \(.cve_id) | \(.vendor) | \(.product) | \(.name) | \(.date_added) |"
+              ' .janitor/wisdom_manifest.json)
+              echo "${ROW}"
+            done < .janitor/kev_added.txt
+
+            echo ""
+            echo "## AST Gate Checklist"
+            echo ""
+            echo "Review each entry above. For each entry whose language / framework is"
+            echo "covered by a Janitor grammar, check whether an AST gate exists in"
+            echo "\`crates/forge/src/slop_hunter.rs\`. If not, file a P0 IDEA entry in"
+            echo "\`docs/INNOVATION_LOG.md\` under **P0 — Enterprise Security Depth**."
+            echo ""
+            echo "### Languages covered by the Janitor (23 grammars)"
+            echo "Rust · Python · TypeScript · JavaScript · Go · Java · C# · C++ · C"
+            echo "Ruby · PHP · Swift · Kotlin · Scala · Lua · HCL/Terraform · Nix"
+            echo "GDScript · GLSL · Objective-C · Bash · YAML"
+            echo ""
+            echo "### Checklist"
+            echo ""
+
+            while IFS= read -r cve_id; do
+              PRODUCT=$(jq -r --arg id "$cve_id" \
+                '.entries[] | select(.cve_id == $id) | .product' \
+                .janitor/wisdom_manifest.json)
+              echo "- [ ] **${cve_id}** (${PRODUCT}) — confirm AST gate exists or file IDEA entry"
+            done < .janitor/kev_added.txt
+
+          } > "${CHECKLIST}"
+
+          echo "Checklist written to ${CHECKLIST}"
+          # Promote the new snapshot.
+          cp .janitor/kev_ids_new.txt .janitor/cisa_kev_ids.txt
+
+      - name: Upload updated snapshot and checklist
+        if: steps.diff.outputs.new_count != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cisa-kev-sync-${{ github.run_id }}
+          path: |
+            .janitor/cisa_kev_ids.txt
+            .janitor/kev_checklist.md
+          if-no-files-found: error
+          retention-days: 30

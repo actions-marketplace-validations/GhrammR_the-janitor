@@ -3,8 +3,6 @@ members = [
     "crates/*",
     "crates/experimental/advanced_threats",
     "crates/experimental/backlog_pruner",
-    "crates/experimental/include_deflator",
-    "crates/experimental/phantom_ffi_gate",
     "tools/wisdom-bake",
     "tools/mint-token",
     "tools/parallel-bounce",
@@ -14,44 +12,54 @@ exclude = ["crates/experimental"]
 resolver = "2"
 
 [workspace.package]
-version = "7.8.6"
+version = "10.2.11"
 edition = "2021"
-repository = "https://github.com/GhrammR/the-janitor"
+repository = "https://github.com/janitor-security/the-janitor"
 license = "BUSL-1.1"
-rust-version = "1.88"
+rust-version = "1.92"
 
 [workspace.dependencies]
 # Core
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "signal", "sync", "time"] }
-sysinfo = "0.30"
+tokio = { version = "1.51.0", features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "signal", "sync", "time"] }
+sysinfo = "0.38"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-uuid = { version = "1.10", features = ["v4"] }
+serde_json = "1.0"
+uuid = { version = "1.23", features = ["v4"] }
+libfuzzer-sys = "0.4"
+serial_test = "3"
+opentelemetry = "0.31"
+opentelemetry-otlp = "0.31"
 
 # Cryptography
 blake3 = "1.5"
+hmac = "0.13.0"
+ed25519-dalek = "2.1"
+hex = "0.4"
 
 # Serialization (Zero-Copy)
 rkyv = { version = "0.8", features = ["std", "bytecheck"] }
 bytecheck = { version = "0.8", default-features = false }
 thiserror = "2.0"
+bloom = "0.3.2"
+bitvec = "1.0"
 
 # Parsing
 tree-sitter = "0.26"
-tree-sitter-rust = "0.23"
+tree-sitter-rust = "0.24.2"
 tree-sitter-python = "0.25"
 tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-cpp = "0.23"
-tree-sitter-c = "0.23"
+tree-sitter-c = "0.24.1"
 tree-sitter-java = "0.23"
 tree-sitter-c-sharp = "0.23"
-tree-sitter-go = "0.23"
+tree-sitter-go = "0.25.0"
 tree-sitter-glsl = "0.2.0"
 tree-sitter-objc = "3.0.2"
 tree-sitter-yaml = "0.7.2"
-tree-sitter-bash = "0.23"
-tree-sitter-scala = "0.24"
+tree-sitter-bash = "0.25.1"
+tree-sitter-scala = "0.26.0"
 tree-sitter-ruby = "0.23"
 tree-sitter-php = "0.24"
 tree-sitter-swift = "0.7"
@@ -61,6 +69,13 @@ tree-sitter-hcl = "1.1.0"
 tree-sitter-nix = "0.3.0"
 tree-sitter-gdscript = "6.1.0"
 tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-zig = "1.1.2"
+tree-sitter-solidity = "1.2.13"
+alloy-primitives = "1.5.7"
+prost-reflect = "0.16.4"
+protobuf-parse = "3.7.2"
+openapiv3 = "2.2.0"
+serde_yaml = "0.9.34"
 
 # File System & Path Utilities
 memmap2 = "0.9"
@@ -71,7 +86,7 @@ walkdir = "2.5"
 clap = { version = "4.5", features = ["derive"] }
 
 # Graph
-petgraph = "0.7"
+petgraph = "0.8"
 
 # String matching
 aho-corasick = "1.1"
@@ -80,16 +95,35 @@ aho-corasick = "1.1"
 bumpalo = { version = "3", features = ["collections"] }
 
 # JSON / hashing utilities
-serde_json = "1.0"
-sha2 = "0.10"
+sha2 = "0.11.0"
 flate2 = "1.0"
 toml = "1.0"
+semver = "1.0"
 
 # HTTP client (sync, used for remote audit attestation)
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls-pemfile = "2"
+
+# Post-quantum cryptography — ML-DSA-65 (FIPS 204) for BYOK local attestation
+fips204 = "0.4"
+fips205 = "0.4.1"
+
+# Base64 encoding for PQC signature serialization
+base64 = "0.22"
+
+# Secure memory zeroization — wipe key material from RAM immediately after use.
+# `derive` feature enables #[derive(Zeroize, ZeroizeOnDrop)] on key structs.
+zeroize = { version = "1", features = ["derive"] }
 
 # Lock-free atomic reference counting
 arc-swap = "1.7"
+
+# Wasm sandbox — BYOP (Bring Your Own Policy) custom rule execution
+# Cranelift JIT + WAT text-format parsing. Default features retained so all
+# required runtime types are available; LTO in the release profile strips
+# unreachable code paths, controlling the final binary footprint.
+wasmtime = { version = "44.0.2", features = ["cranelift", "wat"] }
 
 # Git integration (C binding to libgit2 — requires libgit2-dev in build env)
 git2 = "0.20"
@@ -97,14 +131,21 @@ git2 = "0.20"
 # Data parallelism
 rayon = "1.10"
 
+# ZIP archive extraction — OSV bulk corpus download (in-memory, no temp files)
+zip = "8"
+
+# File-system watch — SBOM drift daemon (inotify/kqueue via OS-native backend)
+notify = "8"
+
 # Progress reporting
-indicatif = "0.17"
+indicatif = "0.18"
 
 [profile.release]
 # Size-first: tree-sitter grammar tables dominate binary weight.
-# opt-level "z" + LTO together eliminate dead parse tables and LLVM IR bloat.
+# thin LTO preserves dead-parse-table elimination at ~60% lower peak linker RAM
+# vs fat LTO — required for 8GB WSL2 builds as workspace grows past 30 crates.
 opt-level = "z"
-lto = true
-codegen-units = 1
+lto = false
+codegen-units = 16
 strip = true
 panic = "abort"

@@ -26,6 +26,12 @@ updates:
         patterns:
           - "rkyv"
           - "bytecheck"
+    ignore:
+      - dependency-name: "sysinfo"
+        versions:
+          - ">= 0.39"
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -39,4 +45,6 @@ updates:
       include: "scope"
     labels:
       - "dependencies"
-      - "github-actions"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

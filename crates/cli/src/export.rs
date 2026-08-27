@@ -6,26 +6,31 @@
 //! Static-scan fallback: when no bounce log exists, loads `.janitor/symbols.rkyv`
 //! and emits one CSV row per dead symbol (PR-specific columns left empty).
 //!
-//! ## Columns (14 total)
+//! ## Columns (17 total)
 //!
 //! | # | Column | Notes |
 //! |---|--------|-------|
 //! | 1 | `PR_Number` | Empty string when absent |
 //! | 2 | `Author` | Empty string when absent |
 //! | 3 | `Score` | Composite weighted slop score |
-//! | 4 | `Mesa_Triggered` | Reserved for SaaS; always `FALSE` in CLI |
-//! | 5 | `Trust_Delta` | Reserved for SaaS; always `0` in CLI |
-//! | 6 | `Unlinked_PR` | `1` if no issue link detected, else `0` |
-//! | 7 | `Logic_Clones` | SimHash clone pairs within the patch |
-//! | 8 | `Violation_Reasons` | Human-readable audit trail; all flags joined with `\|` |
-//! | 9 | `Time_Saved_Hours` | 0.2 h per necrotic intercept (labor reclaimed) |
+//! | 4 | `Threat_Class` | `"Critical"` \| `"Necrotic"` \| `"StructuralSlop"` \| `"Boilerplate"` |
+//! | 5 | `Unlinked_PR` | `TRUE` if no issue link detected, else `FALSE` |
+//! | 6 | `Logic_Clones` | SimHash clone pairs within the patch |
+//! | 7 | `Antipattern_IDs` | Pipe-delimited structured rule labels only (e.g. `security:compiled_payload_anomaly\|antipattern:ncd_anomaly`) |
+//! | 8 | `Collided_PRs` | Pipe-delimited collided PR numbers; empty if none |
+//! | 9 | `Time_Saved_Hours` | necrotic_count × 12 min ÷ 60; 12 min = conservative senior-engineer triage estimate per Workslop research 2026 |
 //! | 10 | `Operational_Savings_USD` | $150 if Critical Threat (security: / Swarm), $20 if Necrotic GC, else $0 |
 //! | 11 | `Timestamp` | ISO 8601 UTC |
 //! | 12 | `PR_State` | `open`, `merged`, or `closed` |
 //! | 13 | `Is_Bot` | `TRUE` when author is in `trusted_bot_authors` (janitor.toml) |
 //! | 14 | `Repo_Slug` | GitHub `owner/repo` slug |
+//! | 15 | `Commit_SHA` | Git commit SHA of the PR head at bounce time; empty when unavailable |
+//! | 16 | `Policy_Hash` | BLAKE3 hex digest of `janitor.toml` at bounce time; empty when no manifest present |
+//! | 17 | `Agentic_Contribution_Pct` | `(agentic commits / total PR commits) × 100`; 100.0 when PR author is a detected agentic actor, 0.0 otherwise |
 
 use anyhow::Result;
+use janitor_gov::compartment::{enforce_flow, Clearance};
+use serde_json::Value;
 use std::io::Write as _;
 use std::path::Path;
 
@@ -53,6 +58,13 @@ fn csv_sanitize(s: &str) -> String {
 /// multi-byte characters as `â€"` or similar mojibake).
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
+fn enforce_siem_export_flow() -> Result<()> {
+    let src = Clearance::from_optional_env(std::env::var("JANITOR_DATA_CLEARANCE").ok())?;
+    let dst = Clearance::from_optional_env(std::env::var("JANITOR_SIEM_CLEARANCE").ok())?;
+    enforce_flow(src, dst)?;
+    Ok(())
+}
+
 /// Open `path` for writing, write the UTF-8 BOM, and return a `csv::Writer`
 /// wrapping the file.  Returns an `anyhow::Error` on any I/O failure.
 fn bom_csv_writer(path: &Path) -> Result<csv::Writer<std::io::BufWriter<std::fs::File>>> {
@@ -62,6 +74,171 @@ fn bom_csv_writer(path: &Path) -> Result<csv::Writer<std::io::BufWriter<std::fs:
     buf.write_all(UTF8_BOM)
         .map_err(|e| anyhow::anyhow!("Writing UTF-8 BOM to {}: {}", path.display(), e))?;
     Ok(csv::Writer::from_writer(buf))
+}
+
+/// CSV header row — 17 columns.
+const CSV_HEADER: [&str; 17] = [
+    "PR_Number",
+    "Author",
+    "Score",
+    "Threat_Class",
+    "Unlinked_PR",
+    "Logic_Clones",
+    "Antipattern_IDs",
+    "Collided_PRs",
+    "Time_Saved_Hours",
+    "Operational_Savings_USD",
+    "Timestamp",
+    "PR_State",
+    "Is_Bot",
+    "Repo_Slug",
+    "Commit_SHA",
+    "Policy_Hash",
+    "Agentic_Contribution_Pct",
+];
+
+/// Derive the `Threat_Class` string for a bounce log entry.
+///
+/// - `"Critical"` — `is_critical_threat` is true (security antipattern or Swarm collision); $150.
+/// - `"Necrotic"` — `necrotic_flag` is set, OR zombie deps detected (not critical); $20.
+/// - `"StructuralSlop"` — `slop_score > 0`, no critical or necrotic signal; $20.
+///   Includes PRs whose score is raised solely by version silos — their
+///   `slop_score` is non-zero (`version_silo_details.len() × 20`), which is
+///   sufficient to land here without any necrotic or critical signal.
+/// - `"Boilerplate"` — `slop_score == 0`, no threat signal; $0.
+///
+/// Version silos are NOT "Necrotic": they represent architectural debt that
+/// requires a human dependency-graph review, not an automated bot-close.  A
+/// silo PR has `slop_score >= 20` and therefore can never be `"Boilerplate"`.
+fn threat_class(entry: &crate::report::BounceLogEntry) -> &'static str {
+    if crate::report::is_critical_threat(entry) {
+        "Critical"
+    } else if entry.necrotic_flag.is_some() || !entry.zombie_deps.is_empty() {
+        "Necrotic"
+    } else if entry.slop_score > 0 {
+        "StructuralSlop"
+    } else {
+        "Boilerplate"
+    }
+}
+
+/// Build the `Antipattern_IDs` field: pipe-delimited structured rule labels.
+///
+/// When `necrotic_flag` is set, a `backlog:<FLAG>` label is prepended so that
+/// Necrotic rows always carry at least one machine-readable identifier even when
+/// no language-specific antipattern fired (e.g. pure zombie-dep or dead-symbol GC).
+///
+/// The structured labels are already in the form `security:compiled_payload_anomaly`
+/// or `antipattern:ncd_anomaly`; human-readable text is not included.
+fn antipattern_ids(entry: &crate::report::BounceLogEntry) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(flag) = entry.necrotic_flag.as_deref() {
+        parts.push(format!("backlog:{flag}"));
+    }
+    if !entry.zombie_deps.is_empty() {
+        parts.push("architecture:zombie_dependency".to_owned());
+    }
+    // NOTE: version silos are NOT pushed here because the silo detector already
+    // injects `architecture:version_silo (...)` into `entry.antipatterns` via
+    // `score.antipattern_details`.  Pushing from `entry.version_silos` as well
+    // would produce a duplicate `(x2)` entry after `group_strings` collapses.
+    parts.extend(entry.antipatterns.iter().cloned());
+    // Collapse repeated labels: [A, A, A, B] → "A (x3)|B".
+    // Identical structured IDs (e.g. three antipattern:ncd_anomaly hits from
+    // the same patch) are merged so the CSV cell stays readable in Excel/pandas.
+    let grouped = crate::report::group_strings(&parts)
+        .into_iter()
+        .map(|(label, count)| {
+            if count > 1 {
+                format!("{label} (x{count})")
+            } else {
+                label.to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    csv_sanitize(&grouped.join("|"))
+}
+
+/// Build the `Collided_PRs` field: pipe-delimited PR numbers.
+fn collided_prs(entry: &crate::report::BounceLogEntry) -> String {
+    if entry.collided_pr_numbers.is_empty() {
+        String::new()
+    } else {
+        entry
+            .collided_pr_numbers
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
+/// Write one CSV row for a bounce log entry.
+fn write_entry_row(
+    wtr: &mut csv::Writer<impl std::io::Write>,
+    entry: &crate::report::BounceLogEntry,
+) -> Result<()> {
+    let critical = crate::report::is_critical_threat(entry);
+    // Necrotic: pruner-flagged dead-code OR zombie dep — bot-automatable closes.
+    // Version silos are NOT Necrotic: they require human dependency-graph review,
+    // not an automated bulk-close, and they carry slop_score > 0 which places them
+    // in the StructuralSlop tier instead.
+    let necrotic = entry.necrotic_flag.is_some() || !entry.zombie_deps.is_empty();
+    // Structural Slop: slop_score > 0 with no critical or necrotic signal.
+    // Includes version-silo PRs (slop_score = version_silo_details.len() × 20).
+    let structural_slop = !critical && !necrotic && entry.slop_score > 0;
+
+    // Time_Saved_Hours: necrotic_count × 12 min ÷ 60.
+    // Only necrotic (bot-automatable) PRs contribute reclaimed triage minutes.
+    // Structural Slop still requires human review — no time credit.
+    let time_saved_h: f64 = if necrotic { 12.0 / 60.0 } else { 0.0 };
+
+    // Categorical billing: Critical ($150) > Necrotic GC ($20) > Structural Slop ($20) > $0.
+    let savings_usd: u32 = if critical {
+        150
+    } else if necrotic || structural_slop {
+        20
+    } else {
+        0
+    };
+
+    let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
+    let author_str = csv_sanitize(entry.author.as_deref().unwrap_or(""));
+    let score_str = entry.slop_score.to_string();
+    let tc = threat_class(entry);
+    let unlinked_str = if entry.unlinked_pr > 0 {
+        "TRUE"
+    } else {
+        "FALSE"
+    };
+    let clones_str = entry.logic_clones_found.min(50).to_string();
+    let ap_ids = antipattern_ids(entry);
+    let collided = collided_prs(entry);
+    let time_str = format!("{time_saved_h:.4}");
+    let savings_str = savings_usd.to_string();
+    let state_str = entry.state.to_string();
+    let is_bot_str = if entry.is_bot { "TRUE" } else { "FALSE" };
+
+    wtr.write_record([
+        pr_num_str.as_str(),
+        author_str.as_str(),
+        score_str.as_str(),
+        tc,
+        unlinked_str,
+        clones_str.as_str(),
+        ap_ids.as_str(),
+        collided.as_str(),
+        time_str.as_str(),
+        savings_str.as_str(),
+        entry.timestamp.as_str(),
+        state_str.as_str(),
+        is_bot_str,
+        entry.repo_slug.as_str(),
+        entry.commit_sha.as_str(),
+        entry.policy_hash.as_str(),
+        &format!("{:.2}", entry.agentic_pct),
+    ])?;
+    Ok(())
 }
 
 /// Export all bounce logs found under `gauntlet_root` to a single aggregate CSV file.
@@ -93,76 +270,11 @@ pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
     );
 
     let mut wtr = bom_csv_writer(out)?;
-
-    wtr.write_record([
-        "PR_Number",
-        "Author",
-        "Score",
-        "Mesa_Triggered",
-        "Trust_Delta",
-        "Unlinked_PR",
-        "Logic_Clones",
-        "Violation_Reasons",
-        "Time_Saved_Hours",
-        "Operational_Savings_USD",
-        "Timestamp",
-        "PR_State",
-        "Is_Bot",
-        "Repo_Slug",
-    ])?;
-
-    const MINUTES_PER_TRIAGE: f64 = 12.0;
+    wtr.write_record(CSV_HEADER)?;
 
     for (_repo_name, entries) in repo_logs {
         for entry in &entries {
-            let critical = crate::report::is_critical_threat(entry);
-            let necrotic = entry.necrotic_flag.is_some();
-
-            let time_saved_h = if necrotic {
-                MINUTES_PER_TRIAGE / 60.0
-            } else {
-                0.0_f64
-            };
-            // Categorical billing: Critical Threats ($150) > GC-only Necrotic ($20) > $0.
-            let savings_usd: u32 = if critical {
-                150
-            } else if necrotic {
-                20
-            } else {
-                0
-            };
-
-            let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
-            let author_str = csv_sanitize(entry.author.as_deref().unwrap_or(""));
-            let score_str = entry.slop_score.to_string();
-            let unlinked_str = if entry.unlinked_pr > 0 {
-                "TRUE"
-            } else {
-                "FALSE"
-            };
-            let clones_str = entry.logic_clones_found.min(50).to_string();
-            let violation_reasons = csv_sanitize(&build_violation_reasons(entry));
-            let time_str = format!("{time_saved_h:.4}");
-            let savings_str = savings_usd.to_string();
-            let state_str = entry.state.to_string();
-            let is_bot_str = if entry.is_bot { "TRUE" } else { "FALSE" };
-
-            wtr.write_record([
-                pr_num_str.as_str(),
-                author_str.as_str(),
-                score_str.as_str(),
-                "FALSE",
-                "0",
-                unlinked_str, // Unlinked_PR — boolean TRUE/FALSE
-                clones_str.as_str(),
-                violation_reasons.as_str(),
-                time_str.as_str(),
-                savings_str.as_str(),
-                entry.timestamp.as_str(),
-                state_str.as_str(),
-                is_bot_str,
-                entry.repo_slug.as_str(),
-            ])?;
+            write_entry_row(&mut wtr, entry)?;
         }
     }
 
@@ -172,6 +284,65 @@ pub fn cmd_export_global(gauntlet_root: &Path, out: &Path) -> Result<()> {
         out.display()
     );
     Ok(())
+}
+
+fn write_cef_lines(entries: &[crate::report::BounceLogEntry], out: &Path) -> Result<()> {
+    enforce_siem_export_flow()?;
+    let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);
+    for entry in entries {
+        writeln!(file, "{}", entry.to_cef_string())?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+fn write_ocsf_json(entries: &[crate::report::BounceLogEntry], out: &Path) -> Result<()> {
+    enforce_siem_export_flow()?;
+    let docs: Vec<Value> = entries.iter().map(|entry| entry.to_ocsf_json()).collect();
+    let file = std::fs::File::create(out)?;
+    let writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(writer, &docs)?;
+    Ok(())
+}
+
+pub fn cmd_export_global_with_format(gauntlet_root: &Path, out: &Path, format: &str) -> Result<()> {
+    use crate::report::discover_bounce_logs;
+
+    let repo_logs = discover_bounce_logs(gauntlet_root);
+    if repo_logs.is_empty() {
+        anyhow::bail!(
+            "No bounce logs found under `{}`. \
+             Run `janitor bounce` in each repo to populate logs.",
+            gauntlet_root.display()
+        );
+    }
+
+    let entries: Vec<crate::report::BounceLogEntry> = repo_logs
+        .into_iter()
+        .flat_map(|(_, entries)| entries)
+        .collect();
+    match format {
+        "csv" => cmd_export_global(gauntlet_root, out),
+        "cef" => {
+            write_cef_lines(&entries, out)?;
+            println!(
+                "Exported {} entries (global) → {}",
+                entries.len(),
+                out.display()
+            );
+            Ok(())
+        }
+        "ocsf" => {
+            write_ocsf_json(&entries, out)?;
+            println!(
+                "Exported {} entries (global) → {}",
+                entries.len(),
+                out.display()
+            );
+            Ok(())
+        }
+        other => anyhow::bail!("unknown export format `{other}`; expected csv|cef|ocsf"),
+    }
 }
 
 /// Export the bounce log at `<repo>/.janitor/bounce_log.ndjson` to a CSV file.
@@ -188,82 +359,47 @@ pub fn cmd_export(repo: &Path, out: &Path) -> Result<()> {
     }
 
     let mut wtr = bom_csv_writer(out)?;
-
-    // ROI constant — mirrors report.rs.
-    const MINUTES_PER_TRIAGE: f64 = 12.0;
-
-    // Exact 14-column header schema.
-    wtr.write_record([
-        "PR_Number",
-        "Author",
-        "Score",
-        "Mesa_Triggered",
-        "Trust_Delta",
-        "Unlinked_PR",
-        "Logic_Clones",
-        "Violation_Reasons",
-        "Time_Saved_Hours",
-        "Operational_Savings_USD",
-        "Timestamp",
-        "PR_State",
-        "Is_Bot",
-        "Repo_Slug",
-    ])?;
+    wtr.write_record(CSV_HEADER)?;
 
     for entry in &entries {
-        let critical = crate::report::is_critical_threat(entry);
-        let necrotic = entry.necrotic_flag.is_some();
-
-        let time_saved_h = if necrotic {
-            MINUTES_PER_TRIAGE / 60.0
-        } else {
-            0.0_f64
-        };
-        // Categorical billing: Critical Threats ($150) > GC-only Necrotic ($20) > $0.
-        let savings_usd: u32 = if critical {
-            150
-        } else if necrotic {
-            20
-        } else {
-            0
-        };
-
-        let pr_num_str = entry.pr_number.map(|n| n.to_string()).unwrap_or_default();
-        let author_str = csv_sanitize(entry.author.as_deref().unwrap_or(""));
-        let score_str = entry.slop_score.to_string();
-        let unlinked_str = if entry.unlinked_pr > 0 {
-            "TRUE"
-        } else {
-            "FALSE"
-        };
-        let clones_str = entry.logic_clones_found.min(50).to_string();
-        let violation_reasons = csv_sanitize(&build_violation_reasons(entry));
-        let time_str = format!("{time_saved_h:.4}");
-        let savings_str = savings_usd.to_string();
-        let state_str = entry.state.to_string();
-        let is_bot_str = if entry.is_bot { "TRUE" } else { "FALSE" };
-
-        wtr.write_record([
-            pr_num_str.as_str(),
-            author_str.as_str(),
-            score_str.as_str(),
-            "FALSE",      // Mesa_Triggered — SaaS reserved
-            "0",          // Trust_Delta   — SaaS reserved
-            unlinked_str, // Unlinked_PR   — boolean TRUE/FALSE
-            clones_str.as_str(),
-            violation_reasons.as_str(),
-            time_str.as_str(),
-            savings_str.as_str(),
-            entry.timestamp.as_str(),
-            state_str.as_str(),
-            is_bot_str,
-            entry.repo_slug.as_str(),
-        ])?;
+        write_entry_row(&mut wtr, entry)?;
     }
 
     wtr.flush()?;
     println!("Exported {} entries → {}", entries.len(), out.display());
     Ok(())
+}
+
+pub fn cmd_export_with_format(repo: &Path, out: &Path, format: &str) -> Result<()> {
+    let janitor_dir = repo.join(".janitor");
+    let entries = crate::report::load_bounce_log(&janitor_dir);
+
+    match format {
+        "csv" => cmd_export(repo, out),
+        "cef" => {
+            if entries.is_empty() {
+                anyhow::bail!(
+                    "No bounce log found under {}.\nRun `janitor bounce` first to populate data.",
+                    janitor_dir.display()
+                );
+            }
+            write_cef_lines(&entries, out)?;
+            println!("Exported {} entries → {}", entries.len(), out.display());
+            Ok(())
+        }
+        "ocsf" => {
+            if entries.is_empty() {
+                anyhow::bail!(
+                    "No bounce log found under {}.\nRun `janitor bounce` first to populate data.",
+                    janitor_dir.display()
+                );
+            }
+            write_ocsf_json(&entries, out)?;
+            println!("Exported {} entries → {}", entries.len(), out.display());
+            Ok(())
+        }
+        other => anyhow::bail!("unknown export format `{other}`; expected csv|cef|ocsf"),
+    }
 }
 
 /// Static-scan fallback: load `.janitor/symbols.rkyv` and emit one CSV row per
@@ -309,29 +445,13 @@ fn export_static_scan(janitor_dir: &Path, out: &Path) -> Result<()> {
     });
 
     let mut wtr = bom_csv_writer(out)?;
-
-    wtr.write_record([
-        "PR_Number",
-        "Author",
-        "Score",
-        "Mesa_Triggered",
-        "Trust_Delta",
-        "Unlinked_PR",
-        "Logic_Clones",
-        "Violation_Reasons",
-        "Time_Saved_Hours",
-        "Operational_Savings_USD",
-        "Timestamp",
-        "PR_State",
-        "Is_Bot",
-        "Repo_Slug",
-    ])?;
+    wtr.write_record(CSV_HEADER)?;
 
     let timestamp = crate::utc_now_iso8601();
 
     for entry in &dead {
         let byte_size = entry.end_byte.saturating_sub(entry.start_byte);
-        // Score proxy: byte size in units of 100 B (informational — dead symbols
+        // Score proxy: byte size in units of 10 B (informational — dead symbols
         // no longer contribute to the bounce score formula).
         let score = byte_size / 10;
         let score_str = score.to_string();
@@ -344,17 +464,20 @@ fn export_static_scan(janitor_dir: &Path, out: &Path) -> Result<()> {
             "", // PR_Number — N/A for static scan
             "", // Author — N/A for static scan
             score_str.as_str(),
-            "FALSE", // Mesa_Triggered
-            "0",     // Trust_Delta
-            "0",     // Unlinked_PR
-            "0",     // Logic_Clones
-            violation.as_str(),
-            "0.0000", // Time_Saved_Hours
-            "0",      // Operational_Savings_USD
+            "Boilerplate",      // Threat_Class — N/A, default to Boilerplate
+            "FALSE",            // Unlinked_PR
+            "0",                // Logic_Clones
+            violation.as_str(), // Antipattern_IDs — use dead symbol description
+            "",                 // Collided_PRs
+            "0.0000",           // Time_Saved_Hours
+            "0",                // Operational_Savings_USD
             timestamp.as_str(),
             "open",  // PR_State — N/A for static scan
             "FALSE", // Is_Bot — N/A for static scan
             "",      // Repo_Slug — N/A for static scan
+            "",      // Commit_SHA — N/A for static scan
+            "",      // Policy_Hash — N/A for static scan
+            "0.00",  // Agentic_Contribution_Pct — N/A for static scan
         ])?;
     }
 
@@ -365,142 +488,4 @@ fn export_static_scan(janitor_dir: &Path, out: &Path) -> Result<()> {
         out.display()
     );
     Ok(())
-}
-
-/// Build the `Violation_Reasons` string for one [`BounceLogEntry`].
-///
-/// Synthesises every flag stored in the entry into a `" | "`-separated list.
-/// Ordered by scoring weight (heaviest first) so the dominant reason leads.
-///
-/// For legacy log entries written before `unlinked_pr`/`antipatterns` were
-/// persisted, falls back to a residual-score heuristic: score points not
-/// accounted for by the stored numeric fields are labelled as inferred violations.
-///
-/// [`BounceLogEntry`]: crate::report::BounceLogEntry
-fn build_violation_reasons(entry: &crate::report::BounceLogEntry) -> String {
-    let mut reasons: Vec<String> = Vec::new();
-
-    // ── Stored antipattern descriptions (×50 each) ─────────────────────────
-    for ap in &entry.antipatterns {
-        reasons.push(ap.clone());
-    }
-
-    // ── Zombie symbol reintroduction (×15 each) ────────────────────────────
-    if entry.zombie_symbols_added > 0 {
-        reasons.push(format!(
-            "Zombie Symbol Reintroduction x{}",
-            entry.zombie_symbols_added
-        ));
-    }
-
-    // ── Structural clones (×5 each) ────────────────────────────────────────
-    if entry.logic_clones_found > 0 {
-        let count_str = if entry.logic_clones_found > 50 {
-            "50+".to_owned()
-        } else {
-            entry.logic_clones_found.to_string()
-        };
-        reasons.push(format!("Structural Clone x{count_str}"));
-    }
-
-    // ── Comment violations (×5 each) ───────────────────────────────────────
-    for cv in &entry.comment_violations {
-        reasons.push(cv.clone());
-    }
-
-    // ── Unlinked PR (×20 flat) ─────────────────────────────────────────────
-    if entry.unlinked_pr > 0 {
-        reasons.push("Unlinked PR".to_owned());
-    }
-
-    // ── Necrotic flag (Backlog Pruner verdict) ─────────────────────────────
-    if let Some(ref flag) = entry.necrotic_flag {
-        reasons.push(format!("Necrotic: {flag}"));
-    }
-
-    // ── Zombie dependencies (informational) ────────────────────────────────
-    if !entry.zombie_deps.is_empty() {
-        reasons.push(format!(
-            "Zombie Dependency: {}",
-            entry.zombie_deps.join(", ")
-        ));
-    }
-
-    // ── Clone collisions (per-PR LSH hit list, informational) ──────────────
-    if !entry.collided_pr_numbers.is_empty() {
-        let hits: Vec<String> = entry
-            .collided_pr_numbers
-            .iter()
-            .map(|n| format!("#{n}"))
-            .collect();
-        reasons.push(format!("Clone collision: {}", hits.join(", ")));
-    }
-
-    // ── Domain routing suppression (engine transparency) ──────────────────
-    if entry.suppressed_by_domain > 0 {
-        reasons.push(format!(
-            "Domain-suppressed findings: {}",
-            entry.suppressed_by_domain
-        ));
-    }
-
-    // ── Legacy residual heuristic ──────────────────────────────────────────
-    // Log entries written before antipattern/unlinked_pr fields were persisted
-    // will have all of the above as zero/empty even when slop_score > 0.
-    // Compute what score is explained by known fields; label the gap.
-    if reasons.is_empty() && entry.slop_score > 0 {
-        let known: u32 = entry.dead_symbols_added * 10
-            + entry.logic_clones_found * 5
-            + entry.zombie_symbols_added * 15
-            + entry.unlinked_pr * 20
-            + entry.comment_violations.len() as u32 * 5;
-        let residual = entry.slop_score.saturating_sub(known);
-        if residual > 0 {
-            // Attempt to decompose the residual into known scoring units.
-            // Priority: antipatterns (50 pts) → unlinked (20 pts).
-            let mut rem = residual;
-            let inferred_antipatterns = rem / 50;
-            rem %= 50;
-            let inferred_unlinked = rem / 20;
-            rem %= 20;
-
-            if inferred_antipatterns > 0 {
-                reasons.push(format!("Language Antipattern x{inferred_antipatterns}"));
-            }
-            if inferred_unlinked > 0 {
-                reasons.push("Unlinked PR".to_owned());
-            }
-            if rem > 0 {
-                reasons.push(format!("Unknown violation (residual: {rem})"));
-            }
-        }
-    }
-
-    // ── Deduplicate: count identical strings, preserving first-occurrence order ─
-    // A single PR may trigger the same antipattern (e.g. "Vacuous unsafe block")
-    // hundreds of times in a large FFI codebase, blowing out the CSV cell.
-    // Collapse these into "Description (xN)" to keep the column readable.
-    let mut counts: std::collections::HashMap<String, u32> =
-        std::collections::HashMap::with_capacity(reasons.len());
-    let mut ordered: Vec<String> = Vec::with_capacity(reasons.len());
-    for r in reasons {
-        let entry = counts.entry(r.clone()).or_insert(0);
-        if *entry == 0 {
-            ordered.push(r);
-        }
-        *entry += 1;
-    }
-    let deduped: Vec<String> = ordered
-        .into_iter()
-        .map(|r| {
-            let count = counts[&r];
-            if count > 1 {
-                format!("{r} (x{count})")
-            } else {
-                r
-            }
-        })
-        .collect();
-
-    deduped.join(" | ")
 }

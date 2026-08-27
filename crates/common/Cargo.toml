@@ -11,10 +11,9 @@ rkyv = { version = "0.8", features = ["std", "bytecheck"] }
 bytecheck = { version = "0.8", default-features = false }
 
 serde = { version = "1.0", features = ["derive"] }
+serde_json.workspace = true
 toml.workspace = true
-
-# Types
-bitflags = "2.6"
+semver.workspace = true
 
 # Error Handling
 thiserror = "2.0"
@@ -22,10 +21,32 @@ anyhow = "1.0"
 
 # Disk I/O
 memmap2.workspace = true
-dunce.workspace = true
 
 # Checksum (registry integrity)
 blake3.workspace = true
+bloom.workspace = true
+bitvec.workspace = true
+base64.workspace = true
+ed25519-dalek.workspace = true
+fips204.workspace = true
+fips205.workspace = true
+sha2.workspace = true
+
+# Secure key material zeroization (PQC private key bundles)
+zeroize.workspace = true
+
+# HTTP client (SCM commit-status publishing — GitLab and Azure DevOps)
+ureq.workspace = true
 
 # System introspection (Physarum Protocol memory backpressure)
 sysinfo.workspace = true
+
+# Union-find for AffinityMaturator vulnerability-family grouping (P9-1)
+ena = "0.14"
+
+# Deterministic PRNG for AffinityMaturator mutation-select cycle (P9-1 Phase B)
+rand = { version = "0.9", default-features = false, features = ["std"] }
+rand_chacha = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
